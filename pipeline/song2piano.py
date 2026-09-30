@@ -44,6 +44,22 @@ def transcribe(wav: Path, **kw) -> list:
     return [n for i in midi.instruments for n in i.notes]
 
 
+def merge_same_pitch(notes, gap):
+    """같은 높이의 음이 gap초 이내로 끊겼다 다시 시작하면 하나로 이어 붙인다."""
+    out = []
+    for n in sorted(notes, key=lambda n: (n.pitch, n.start)):
+        if out and out[-1].pitch == n.pitch and n.start - out[-1].end <= gap:
+            out[-1].end = max(out[-1].end, n.end)
+            out[-1].velocity = max(out[-1].velocity, n.velocity)
+        else:
+            out.append(n)
+    return sorted(out, key=lambda n: n.start)
+
+
+def in_range(notes, lo, hi):
+    return [n for n in notes if lo <= n.pitch <= hi]
+
+
 def monophonic(notes, min_len):
     """겹치는 음 중 큰 음(velocity)만 남기는 단선율화."""
     notes = sorted((n for n in notes if n.end - n.start >= min_len), key=lambda n: n.start)
@@ -118,14 +134,14 @@ def build(stems, a):
     pm = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
     piano = pretty_midi.Instrument(0, name="Piano")
     parts = {
-        "vocals": monophonic(transcribe(stems["vocals"], minimum_note_length=80, onset_threshold=0.35,
+        "vocals": monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80, onset_threshold=0.35,
                                         frame_threshold=0.2, melodia_trick=True,
-                                        minimum_frequency=100, maximum_frequency=1200), a.min_len),
-        "bass": monophonic(transcribe(stems["bass"], minimum_note_length=90, onset_threshold=0.4,
+                                        minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len),
+        "bass": monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90, onset_threshold=0.4,
                                       frame_threshold=0.25, minimum_frequency=35,
-                                      maximum_frequency=350), 0.1),
-        "other": limit_poly(transcribe(stems["other"], minimum_note_length=100, onset_threshold=0.45,
-                                       frame_threshold=0.3), a.accomp_poly, 0.1, 30),
+                                      maximum_frequency=350), 28, 60), 0.15), 0.1),
+        "other": limit_poly(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=100, onset_threshold=0.45,
+                                       frame_threshold=0.3), 48, 88), 0.2), a.accomp_poly, 0.2, 30),
     }
     for name, ns in parts.items():
         if name == "other" and a.no_accompaniment:
@@ -138,7 +154,7 @@ def build(stems, a):
     return pm
 
 
-def to_score(midi_path: Path, xml_path: Path):
+def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
     from music21 import converter, stream, clef, meter, tempo
     s = converter.parse(str(midi_path), quantizePost=True, quarterLengthDivisors=(4, 3))
     flat = s.flatten()
@@ -153,6 +169,7 @@ def to_score(midi_path: Path, xml_path: Path):
                 n = chord.Chord(group) if len(group) > 1 else note.Note(group[0])
                 n.quarterLength = max(0.25, el.quarterLength)
                 part.insert(el.offset, n)
+    right.insert(0, tempo.MetronomeMark(number=round(bpm)))
     score = stream.Score([right, left])
     for p in score.parts:
         p.insert(0, meter.TimeSignature("4/4"))
@@ -166,7 +183,7 @@ def main():
     ap.add_argument("-o", "--out", type=Path, default=Path("out"))
     ap.add_argument("--model", default="htdemucs")
     ap.add_argument("--min-len", type=float, default=0.1, help="보컬 최소 음 길이(초)")
-    ap.add_argument("--accomp-poly", type=int, default=3, help="반주 최대 동시음")
+    ap.add_argument("--accomp-poly", type=int, default=2, help="반주 최대 동시음")
     ap.add_argument("--no-accompaniment", action="store_true", help="멜로디+베이스만")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
@@ -177,7 +194,7 @@ def main():
     pm.write(str(mid)); print("MIDI:", mid)
     try:
         xml = a.out / f"{a.audio.stem}_piano.musicxml"
-        to_score(mid, xml); print("악보:", xml)
+        to_score(mid, xml, pm.get_tempo_changes()[1][0]); print("악보:", xml)
     except Exception as e:
         print("악보 변환 실패(MIDI는 저장됨):", e)
 
