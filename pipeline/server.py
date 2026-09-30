@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """정확한 파이프라인을 웹으로: python server.py  ->  http://localhost:8000"""
-import subprocess, sys, uuid
+import subprocess, sys, threading, uuid
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -24,15 +24,30 @@ f.onchange=()=>{n.textContent=f.files[0]?'선택됨: '+f.files[0].name+' ('+(f.f
 b.onclick=async()=>{if(!f.files[0])return s.textContent='파일을 선택하세요';
 b.disabled=true;r.innerHTML='';s.textContent='변환 중… (창을 닫지 마세요)';
 const d=new FormData();d.append('file',f.files[0]);d.append('no_acc',na.checked?'1':'');
-try{const x=await fetch('/convert',{method:'POST',body:d}),j=await x.json();
-if(!x.ok)throw Error(j.error);s.textContent='완료!';
-r.innerHTML=j.files.map(n=>`<a href="/jobs/${j.id}/${n}" download>⬇ ${n}</a>`).join('')}
+try{const x=await fetch('/convert',{method:'POST',body:d}),t=await x.text();let j;
+try{j=JSON.parse(t)}catch(e){throw Error('서버 응답 오류: '+t.slice(0,150))}
+if(!x.ok)throw Error(j.error);const t0=Date.now();
+for(;;){await new Promise(r=>setTimeout(r,3000));
+const y=await fetch('/status/'+j.id),k=JSON.parse(await y.text());
+if(k.status==='done'){s.textContent='완료!';r.innerHTML=k.files.map(n=>`<a href="/jobs/${j.id}/${n}" download>⬇ ${n}</a>`).join('');break}
+if(k.status==='error')throw Error(k.error);
+s.textContent='변환 중… '+Math.round((Date.now()-t0)/1000)+'초 경과 (창을 닫지 마세요)'}}
 catch(e){s.textContent='오류: '+e.message}b.disabled=false}
 </script></html>"""
 
 @app.get("/")
 def index():
     return PAGE
+
+STATE = {}
+
+def work(jid, cmd, d):
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    files = sorted(x.name for x in d.glob("*_piano.*"))
+    if files:
+        STATE[jid] = dict(status="done", files=files)
+    else:
+        STATE[jid] = dict(status="error", error=(p.stderr or p.stdout)[-1500:])
 
 @app.post("/convert")
 def convert():
@@ -46,11 +61,13 @@ def convert():
     cmd = [sys.executable, str(HERE / "song2piano.py"), str(src), "-o", str(d)]
     if request.form.get("no_acc"):
         cmd.append("--no-accompaniment")
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    files = sorted(x.name for x in d.glob("*_piano.*"))
-    if not files:
-        return jsonify(error=(p.stderr or p.stdout)[-1500:]), 500
-    return jsonify(id=jid, files=files)
+    STATE[jid] = dict(status="running")
+    threading.Thread(target=work, args=(jid, cmd, d), daemon=True).start()
+    return jsonify(id=jid)
+
+@app.get("/status/<jid>")
+def status(jid):
+    return jsonify(STATE.get(jid, dict(status="error", error="작업을 찾을 수 없어요(서버가 재시작됐을 수 있어요)")))
 
 @app.get("/jobs/<jid>/<name>")
 def get(jid, name):
