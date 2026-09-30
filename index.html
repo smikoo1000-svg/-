@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music to Piano</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1f;--mut:#6b6b76;--card:#f3f3f7;--acc:#4f46e5}
+@media(prefers-color-scheme:dark){:root{--bg:#121216;--fg:#ececf1;--mut:#9a9aa6;--card:#1d1d24;--acc:#8b85ff}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:820px;margin:0 auto;padding:24px 16px}
+h1{margin:0 0 4px}p.s{color:var(--mut);margin:0 0 20px}
+.card{background:var(--card);border-radius:12px;padding:16px;margin-bottom:16px}
+#drop{border:2px dashed var(--mut);text-align:center;padding:28px;cursor:pointer}
+#drop.on{border-color:var(--acc)}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:15px;cursor:pointer;margin:4px 6px 4px 0}
+button:disabled{opacity:.4;cursor:default}
+label{display:inline-block;margin-right:16px;font-size:14px}
+canvas{width:100%;height:240px;background:var(--bg);border-radius:8px;display:block}
+#st{color:var(--mut);font-size:14px;min-height:20px}
+progress{width:100%}
+</style>
+</head>
+<body>
+<main>
+<h1>🎹 Music to Piano</h1>
+<p class="s">음악 파일을 올리면 음을 분석해 피아노 연주로 바꿔줍니다. 모든 처리는 브라우저 안에서 이루어지고 파일은 업로드되지 않습니다.</p>
+
+<div class="card" id="drop">오디오 파일을 끌어다 놓거나 클릭해서 선택 (mp3, wav, m4a, ogg)
+<input id="file" type="file" accept="audio/*" hidden></div>
+
+<div class="card">
+<label>민감도 <input id="sens" type="range" min="1" max="10" value="5"></label>
+<label>최대 동시음 <input id="poly" type="range" min="1" max="8" value="4"></label>
+<label>최소 길이(ms) <input id="minlen" type="range" min="40" max="300" value="90"></label>
+<div><button id="go" disabled>피아노로 변환</button></div>
+<progress id="pg" value="0" max="1" hidden></progress>
+<div id="st"></div>
+</div>
+
+<div class="card">
+<canvas id="roll"></canvas>
+<div>
+<button id="play" disabled>▶ 재생 / 정지</button>
+<button id="dmid" disabled>MIDI 저장</button>
+<button id="dwav" disabled>WAV 저장</button>
+</div>
+</div>
+
+<p class="s">방식: STFT → 하모닉 합산 음높이 점수 → 배음 제거를 반복하는 다성 추정 → 음 추적 → 피아노 합성. 단일 악기나 피아노곡에 가장 정확하고, 여러 악기가 섞인 곡은 근사치입니다.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const SR=22050,N=4096,HOP=512,LO=21,HI=108;
+let notes=[],dur=0,buf=null,wavBlob=null,ctx=null,src=null,playing=false,t0=0;
+
+// ---------- FFT ----------
+function fft(re,im){
+  const n=re.length;
+  for(let i=1,j=0;i<n;i++){let b=n>>1;for(;j&b;b>>=1)j^=b;j^=b;if(i<j){[re[i],re[j]]=[re[j],re[i]];[im[i],im[j]]=[im[j],im[i]];}}
+  for(let l=2;l<=n;l<<=1){
+    const a=-2*Math.PI/l,wr=Math.cos(a),wi=Math.sin(a);
+    for(let i=0;i<n;i+=l){let cr=1,ci=0;
+      for(let k=0;k<l/2;k++){
+        const u=i+k,v=u+l/2,tr=re[v]*cr-im[v]*ci,ti=re[v]*ci+im[v]*cr;
+        re[v]=re[u]-tr;im[v]=im[u]-ti;re[u]+=tr;im[u]+=ti;
+        const nr=cr*wr-ci*wi;ci=cr*wi+ci*wr;cr=nr;}}}
+}
+const win=new Float32Array(N).map((_,i)=>0.5-0.5*Math.cos(2*Math.PI*i/N));
+const mf=m=>440*Math.pow(2,(m-69)/12);
+
+// ---------- 오디오 로드 ----------
+async function load(f){
+  $('st').textContent='디코딩 중…';
+  const ab=await f.arrayBuffer();
+  const dec=await new (window.AudioContext||webkitAudioContext)().decodeAudioData(ab);
+  const off=new OfflineAudioContext(1,Math.ceil(dec.duration*SR),SR);
+  const s=off.createBufferSource();s.buffer=dec;s.connect(off.destination);s.start();
+  buf=(await off.startRendering()).getChannelData(0);
+  dur=buf.length/SR;
+  $('st').textContent=`불러옴: ${f.name} (${dur.toFixed(1)}초)`;$('go').disabled=false;
+}
+
+// ---------- 다성 음높이 추정 ----------
+const H=[1,.7,.5,.35,.25];
+async function transcribe(){
+  const sens=+$('sens').value,maxP=+$('poly').value,minMs=+$('minlen').value;
+  const frames=Math.max(0,Math.floor((buf.length-N)/HOP));
+  const binHz=SR/N,nb=N/2;
+  const re=new Float32Array(N),im=new Float32Array(N),S=new Float32Array(nb);
+  const thr=0.55-sens*0.045;            // 상대 임계값
+  const active=[];                       // 프레임별 음 집합
+  let gmax=1e-9;
+  const mags=[];
+  // 전체 프레임 에너지 기준 게이트용 1차 패스
+  const rms=new Float32Array(frames);
+  for(let f=0;f<frames;f++){let e=0;const o=f*HOP;for(let i=0;i<N;i+=8)e+=buf[o+i]**2;rms[f]=Math.sqrt(e/(N/8));gmax=Math.max(gmax,rms[f]);}
+  for(let f=0;f<frames;f++){
+    if(rms[f]<gmax*0.02){active.push([]);continue;}
+    const o=f*HOP;
+    for(let i=0;i<N;i++){re[i]=buf[o+i]*win[i];im[i]=0;}
+    fft(re,im);
+    for(let k=0;k<nb;k++)S[k]=Math.log1p(30*Math.hypot(re[k],im[k])/N*8);
+    // 스펙트럼 평탄화(배경 제거)
+    const W=Float32Array.from(S);
+    const chosen=[];let first=0;
+    for(let it=0;it<maxP;it++){
+      let best=-1,bs=0;
+      for(let m=LO;m<=HI;m++){
+        let sc=0;const f0=mf(m);
+        for(let h=0;h<H.length;h++){
+          const k=Math.round(f0*(h+1)/binHz);if(k>=nb-1)break;
+          sc+=H[h]*Math.max(W[k-1]*.6,W[k],W[k+1]*.6);
+        }
+        if(sc>bs){bs=sc;best=m;}
+      }
+      if(best<0)break;
+      if(it==0)first=bs;
+      if(bs<first*(it==0?0:thr+0.25)||bs<1.2)break;
+      chosen.push(best);
+      const f0=mf(best);
+      for(let h=0;h<8;h++){const k=Math.round(f0*(h+1)/binHz);for(let d=-2;d<=2;d++)if(k+d>0&&k+d<nb)W[k+d]*=0.15;}
+    }
+    active.push(chosen);
+    if(f%200==0){$('pg').value=f/frames;await new Promise(r=>setTimeout(r));}
+  }
+  // 시간축 중앙값 필터(3프레임 다수결) + 음 추적
+  const has=(f,m)=>f>=0&&f<frames&&active[f].includes(m);
+  const out=[],open={};
+  const minF=Math.max(2,Math.round(minMs/1000*SR/HOP));
+  for(let f=0;f<=frames;f++){
+    for(let m=LO;m<=HI;m++){
+      const on=f<frames&&(has(f,m)+has(f-1,m)+has(f+1,m)>=2);
+      if(on&&open[m]===undefined)open[m]=f;
+      else if(!on&&open[m]!==undefined){
+        const s=open[m];delete open[m];
+        if(f-s>=minF){
+          let e=0;for(let i=s;i<f;i++)e=Math.max(e,rms[i]);
+          out.push({m,t:s*HOP/SR,d:(f-s)*HOP/SR,v:Math.min(1,.35+e/gmax*.65)});
+        }}}
+  }
+  return out.sort((a,b)=>a.t-b.t);
+}
+
+// ---------- 피아노 합성 ----------
+function renderPiano(ns,total){
+  const rate=44100,off=new OfflineAudioContext(2,Math.ceil((total+2)*rate),rate);
+  const master=off.createGain();master.gain.value=.35;
+  const comp=off.createDynamicsCompressor();master.connect(comp);comp.connect(off.destination);
+  const P=[1,.6,.35,.2,.12,.07];
+  const wave=off.createPeriodicWave(new Float32Array([0,...P]),new Float32Array(P.length+1));
+  for(const n of ns){
+    const f=mf(n.m),o=off.createOscillator(),g=off.createGain();
+    o.setPeriodicWave(wave);o.frequency.value=f;
+    const t=n.t,rel=Math.min(.35,.1+n.d*.3),end=t+n.d+rel;
+    const decay=Math.max(.6,3.2-n.m/40);      // 저음일수록 길게 울림
+    const peak=n.v*.6/(1+n.m/90);
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(peak,t+.008);
+    g.gain.setTargetAtTime(peak*.25,t+.008,decay/3);
+    g.gain.setTargetAtTime(0,t+n.d,rel/3);
+    o.connect(g);g.connect(master);o.start(t);o.stop(end+.1);
+  }
+  return off.startRendering();
+}
+function wavOf(ab){
+  const c=ab.numberOfChannels,n=ab.length,r=ab.sampleRate,b=new DataView(new ArrayBuffer(44+n*c*2));
+  const w=(o,s)=>[...s].forEach((ch,i)=>b.setUint8(o+i,ch.charCodeAt(0)));
+  w(0,'RIFF');b.setUint32(4,36+n*c*2,true);w(8,'WAVEfmt ');b.setUint32(16,16,true);b.setUint16(20,1,true);
+  b.setUint16(22,c,true);b.setUint32(24,r,true);b.setUint32(28,r*c*2,true);b.setUint16(32,c*2,true);b.setUint16(34,16,true);
+  w(36,'data');b.setUint32(40,n*c*2,true);
+  let p=44;const ch=[...Array(c)].map((_,i)=>ab.getChannelData(i));
+  for(let i=0;i<n;i++)for(let k=0;k<c;k++){const s=Math.max(-1,Math.min(1,ch[k][i]));b.setInt16(p,s*32767,true);p+=2;}
+  return new Blob([b],{type:'audio/wav'});
+}
+
+// ---------- MIDI ----------
+function midiOf(ns){
+  const T=s=>Math.round(s*960),ev=[];               // 120bpm, 480tpq
+  for(const n of ns){const v=Math.max(1,Math.round(n.v*127));ev.push([T(n.t),1,n.m,v],[T(n.t+n.d),0,n.m,0]);}
+  ev.sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const vl=x=>{const o=[x&127];while(x>>=7)o.unshift((x&127)|128);return o;};
+  const tr=[0,0xFF,0x51,3,0x07,0xA1,0x20,0,0xC0,0];let last=0;
+  for(const [t,on,m,v] of ev){tr.push(...vl(t-last),on?0x90:0x80,m,v);last=t;}
+  tr.push(0,0xFF,0x2F,0);
+  const hd=[0x4d,0x54,0x68,0x64,0,0,0,6,0,0,0,1,1,0xE0];
+  const L=tr.length,th=[0x4d,0x54,0x72,0x6b,L>>>24,(L>>16)&255,(L>>8)&255,L&255];
+  return new Blob([new Uint8Array([...hd,...th,...tr])],{type:'audio/midi'});
+}
+
+// ---------- 피아노롤 ----------
+function draw(ph=-1){
+  const c=$('roll'),r=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  c.width=w*r;c.height=h*r;const g=c.getContext('2d');g.scale(r,r);
+  const cs=getComputedStyle(document.body);g.fillStyle=cs.getPropertyValue('--bg');g.fillRect(0,0,w,h);
+  if(!notes.length)return;
+  const rh=h/(HI-LO+1);g.fillStyle=cs.getPropertyValue('--acc');
+  for(const n of notes)g.fillRect(n.t/dur*w,h-(n.m-LO+1)*rh,Math.max(1,n.d/dur*w),Math.max(1.5,rh));
+  if(ph>=0){g.fillStyle=cs.getPropertyValue('--fg');g.fillRect(ph/dur*w,0,1.5,h);}
+}
+function stop(){if(src){try{src.stop()}catch(e){}src=null}playing=false}
+function tick(){if(!playing)return;draw(ctx.currentTime-t0);requestAnimationFrame(tick)}
+
+// ---------- UI ----------
+const drop=$('drop'),fi=$('file');
+drop.onclick=()=>fi.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('on')};
+drop.ondragleave=()=>drop.classList.remove('on');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('on');if(e.dataTransfer.files[0])pick(e.dataTransfer.files[0])};
+fi.onchange=()=>fi.files[0]&&pick(fi.files[0]);
+async function pick(f){try{await load(f)}catch(e){$('st').textContent='파일을 읽을 수 없어요: '+e.message}}
+
+$('go').onclick=async()=>{
+  stop();$('go').disabled=true;$('pg').hidden=false;$('st').textContent='음 분석 중…';
+  try{
+    notes=await transcribe();draw();
+    $('st').textContent=`${notes.length}개 음 검출 · 피아노 렌더링 중…`;
+    const ab=await renderPiano(notes,dur);wavBlob=wavOf(ab);
+    const c=ctx=ctx||new (window.AudioContext||webkitAudioContext)();
+    buf2=c.createBuffer(2,ab.length,ab.sampleRate);
+    for(let i=0;i<2;i++)buf2.copyToChannel(ab.getChannelData(i),i);
+    $('st').textContent=`완료! ${notes.length}개 음`;
+    ['play','dmid','dwav'].forEach(i=>$(i).disabled=false);
+  }catch(e){$('st').textContent='오류: '+e.message}
+  $('pg').hidden=true;$('go').disabled=false;
+};
+let buf2;
+$('play').onclick=()=>{
+  if(playing){stop();draw();return}
+  ctx=ctx||new (window.AudioContext||webkitAudioContext)();ctx.resume();
+  src=ctx.createBufferSource();src.buffer=buf2;src.connect(ctx.destination);
+  src.onended=()=>{playing=false;draw()};t0=ctx.currentTime;src.start();playing=true;tick();
+};
+const dl=(b,n)=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click()};
+$('dmid').onclick=()=>dl(midiOf(notes),'piano.mid');
+$('dwav').onclick=()=>dl(wavBlob,'piano.wav');
+addEventListener('resize',()=>draw());draw();
+</script>
+</body>
+</html>
