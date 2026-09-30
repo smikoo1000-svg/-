@@ -91,11 +91,13 @@ def limit_poly(notes, max_poly, min_len, min_vel):
     return keep
 
 
-def beat_grid(mix: Path, bpm_override=None):
+def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
     """박/첫박(다운비트) 추적. 1순위 Beat This!, 실패하면 librosa. -> (bpm, beats, k0)
     k0 = 첫 마디의 첫 박이 beats 배열의 몇 번째인지."""
     beats = downs = None
     try:
+        if tracker != "beat_this":
+            raise ImportError("librosa 사용 선택")
         from beat_this.inference import File2Beats
         beats, downs = File2Beats(device="cpu", dbn=False)(str(mix))
         beats, downs = np.asarray(beats, float), np.asarray(downs, float)
@@ -215,7 +217,7 @@ def chord_notes(spans, beats, lo=55, hi=71):
 
 
 def build(stems, a):
-    bpm, beats, k0 = beat_grid(stems["mix"], a.bpm)
+    bpm, beats, k0 = beat_grid(stems["mix"], a.bpm, a.tracker)
     print(f"tempo: {bpm:.1f} BPM, beats: {len(beats)}, 첫 마디 시작 박 #{k0}")
     pm = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
     piano = pretty_midi.Instrument(0, name="Piano")
@@ -283,6 +285,7 @@ def main():
     ap.add_argument("--accomp", choices=["chords", "notes", "none"], default="chords",
                     help="반주 방식: chords=코드 인식(기본, 깔끔), notes=음 전사(복잡), none=멜로디+베이스만")
     ap.add_argument("--no-accompaniment", action="store_true", help="--accomp none 과 동일")
+    ap.add_argument("--tracker", choices=["beat_this", "librosa"], default="beat_this", help="박 추적 방식")
     ap.add_argument("--bpm", type=float, default=None, help="BPM을 직접 지정(자동 추정이 틀릴 때)")
     a = ap.parse_args()
     if a.no_accompaniment:
