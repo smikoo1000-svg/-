@@ -133,7 +133,7 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
         _, beats = librosa.beat.beat_track(y=y, sr=sr, units="time", tightness=100)
         beats, downs = np.asarray(beats, float), np.asarray([], float)
     beats = unify_beat_level(beats)
-    bpm = 60 / float(np.median(np.diff(beats)))
+    bpm = 60 * (len(beats) - 1) / float(beats[-1] - beats[0])   # 평균 템포(곡 끝까지 어긋나지 않게)
     while bpm < 80 and len(beats) > 1:               # 너무 느리면 박을 반으로 쪼갬
         beats = np.sort(np.concatenate([beats, (beats[:-1] + beats[1:]) / 2])); bpm *= 2
     while bpm > 160:                                  # 너무 빠르면 박을 2개씩 묶음
@@ -142,7 +142,7 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
         bpm = float(bpm_override)
         beats = beats[0] + np.arange(0, beats[-1] - beats[0] + 60 / bpm, 60 / bpm)
     k0 = int(np.argmin(np.abs(beats - downs[0]))) if len(downs) else 0
-    return bpm, beats, k0
+    return round(bpm, 2), beats, k0        # MIDI에 저장되는 값과 동일하게 맞춰 격자 오차 방지
 
 
 def snap(notes, bpm, beats, k0=0, div=4, shift=None):
