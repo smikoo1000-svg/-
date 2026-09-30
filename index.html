@@ -31,7 +31,7 @@ progress{width:100%}
 <p class="s">음악 파일을 올리면 음을 분석해 피아노 연주로 바꿔줍니다. 모든 처리는 브라우저 안에서 이루어지고 파일은 업로드되지 않습니다.</p>
 
 <div class="card" id="drop">오디오 파일을 끌어다 놓거나 클릭해서 선택 (mp3, wav, m4a, ogg)
-<input id="file" type="file" accept="audio/*" hidden></div>
+<input id="file" type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac,.aac" style="display:none"></div>
 
 <div class="card">
 <label>모드 <select id="mode"><option value="song">가수곡 (멜로디+베이스)</option><option value="poly">피아노/악기곡 (다성)</option></select></label><br>
@@ -272,7 +272,8 @@ drop.onclick=()=>fi.click();
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('on')};
 drop.ondragleave=()=>drop.classList.remove('on');
 drop.ondrop=e=>{e.preventDefault();drop.classList.remove('on');if(e.dataTransfer.files[0])pick(e.dataTransfer.files[0])};
-fi.onchange=()=>fi.files[0]&&pick(fi.files[0]);
+fi.onclick=e=>e.stopPropagation();
+fi.onchange=()=>{if(fi.files[0]){$('st').textContent='선택됨: '+fi.files[0].name;pick(fi.files[0])}};
 async function pick(f){try{await load(f)}catch(e){$('st').textContent='파일을 읽을 수 없어요: '+e.message}}
 
 $('go').onclick=async()=>{

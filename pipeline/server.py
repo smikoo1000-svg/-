@@ -16,10 +16,11 @@ button{background:#4f46e5;color:#fff;border:0;border-radius:8px;padding:10px 18p
 button:disabled{opacity:.5}.c{background:#f3f3f7;border-radius:12px;padding:16px;margin:16px 0}a{display:block;margin:6px 0}</style>
 <h1>🎹 Song to Piano</h1>
 <p>노래 파일을 올리면 보컬·베이스·반주를 분리해 피아노 MIDI와 악보(MusicXML)로 만들어 줍니다. CPU에서는 곡당 몇 분 걸립니다.</p>
-<div class=c><input type=file id=f accept="audio/*"><br><br>
+<div class=c><input type=file id=f accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac,.aac"><div id=n style="color:#666;margin-top:6px"></div><br>
 <label><input type=checkbox id=na> 멜로디+베이스만 (반주 제외)</label><br><br>
 <button id=b>변환</button><p id=s></p><div id=r></div></div>
 <script>
+f.onchange=()=>{n.textContent=f.files[0]?'선택됨: '+f.files[0].name+' ('+(f.files[0].size/1048576).toFixed(1)+'MB)':''};
 b.onclick=async()=>{if(!f.files[0])return s.textContent='파일을 선택하세요';
 b.disabled=true;r.innerHTML='';s.textContent='변환 중… (창을 닫지 마세요)';
 const d=new FormData();d.append('file',f.files[0]);d.append('no_acc',na.checked?'1':'');
