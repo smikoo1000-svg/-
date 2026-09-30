@@ -699,14 +699,31 @@ def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
     right, left = stream.Part(), stream.Part()
     right.insert(0, clef.TrebleClef()); left.insert(0, clef.BassClef())
     from music21 import note, chord
+    # 양손 분리: 마디마다 음높이를 2-means로 나눠 분할점을 정하고(54~66), 이전 마디와 급변하지 않게 섞는다
+    items = []
     for el in flat.notes:
-        ps = list(el.pitches) if el.isChord else [el.pitch]
-        hi = [p for p in ps if p.midi >= 60]; lo = [p for p in ps if p.midi < 60]
-        for group, part in ((hi, right), (lo, left)):
-            if group:
-                n = chord.Chord(group) if len(group) > 1 else note.Note(group[0])
-                n.quarterLength = max(0.25, el.quarterLength)
-                part.insert(el.offset, n)
+        for pp in (list(el.pitches) if el.isChord else [el.pitch]):
+            items.append((float(el.offset), pp.midi, max(0.25, float(el.quarterLength))))
+    split, prev = {}, 60.0
+    for m in range(int(max((o for o, _, _ in items), default=0) // 4) + 1):
+        ps = [pm_ for o, pm_, _ in items if int(o // 4) == m]
+        if len(ps) >= 2:
+            c = [min(ps), max(ps)]
+            for _ in range(8):
+                lo_ = [x for x in ps if abs(x - c[0]) <= abs(x - c[1])] or [c[0]]
+                hi_ = [x for x in ps if abs(x - c[0]) > abs(x - c[1])] or [c[1]]
+                c = [float(np.mean(lo_)), float(np.mean(hi_))]
+            prev = 0.5 * prev + 0.5 * float(np.clip((c[0] + c[1]) / 2, 54, 66))
+        split[m] = prev
+    from music21 import note, chord
+    groups = {}
+    for o, pm_, ql in items:
+        side = "r" if pm_ >= split[int(o // 4)] else "l"
+        groups.setdefault((side, round(o, 4), round(ql, 4)), []).append(pm_)
+    for (side, o, ql), ps in groups.items():
+        n = chord.Chord(ps) if len(ps) > 1 else note.Note(ps[0])
+        n.quarterLength = ql
+        (right if side == "r" else left).insert(o, n)
     right.insert(0, tempo.MetronomeMark(number=round(bpm)))
     score = stream.Score([right, left])
     for p in score.parts:
