@@ -154,7 +154,7 @@ def monophonic(notes, min_len, step=0.01):
     return [n for n in merged if n.end - n.start >= min_len]
 
 
-def fill_missing(notes, wav: Path, lo, hi, default, dur_max=0.3, voiced=False):
+def fill_missing(notes, wav: Path, lo, hi, default, dur_max=0.3, voiced=False, clarity=0.22):
     """원곡에서 강한 소리가 시작하는데 음이 없는 지점에 음을 채운다.
     음이름은 스템 크로마 최대값, 옥타브는 주변 음에 가장 가까운 곳. 음높이가 불분명한 소리(타악·잡음)는 제외."""
     import librosa
@@ -173,7 +173,7 @@ def fill_missing(notes, wav: Path, lo, hi, default, dur_max=0.3, voiced=False):
         fr = min(int(o * sr / hop), ch.shape[1] - 1)
         fe = min(fr + max(2, int(0.12 * sr / hop)), ch.shape[1])
         c = ch[:, fr:fe].mean(axis=1)
-        if c.max() < 0.22 * c.sum():                      # 음높이가 분명하지 않은 소리는 건너뜀
+        if c.max() < clarity * c.sum():                      # 음높이가 분명하지 않은 소리는 건너뜀
             continue
         if voiced and rms[min(fr, len(rms) - 1)] < rthr:
             continue
@@ -491,7 +491,7 @@ def build(stems, a, grid):
         if os.environ.get("CHROMA_FIX"):
             v = chroma_correct(v, stems["vocals"], float(os.environ["CHROMA_FIX"]))
         v = refine_onsets(v, stems["vocals"])
-        v = fill_missing(v, stems["vocals"], 48, 84, 67, voiced=True) if not os.environ.get("NO_FILL") else v
+        v = fill_missing(v, stems["vocals"], 48, 84, 67, voiced=True, clarity=float(os.environ.get("VOCAL_CLARITY", 0.15))) if not os.environ.get("NO_FILL") else v
         if a.offsets:
             v = H.refine_offsets(v, stems["vocals"])
         if a.legato:
