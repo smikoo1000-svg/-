@@ -8,7 +8,7 @@
 
 사용:  python song2piano.py song.mp3 -o out/
 """
-import argparse, hashlib, shutil, subprocess, sys, tempfile
+import argparse, hashlib, os, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from pathlib import Path
@@ -390,8 +390,10 @@ def build(stems, a, grid):
     piano = pretty_midi.Instrument(0, name="Piano")
 
     def vocals():
-        v = monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
-                          onset_threshold=0.35, frame_threshold=0.2, melodia_trick=True,
+        v = monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"],
+                          minimum_note_length=float(os.environ.get("BP_MINLEN", 80)),
+                          onset_threshold=float(os.environ.get("BP_ONSET", 0.35)),
+                          frame_threshold=float(os.environ.get("BP_FRAME", 0.2)), melodia_trick=True,
                           minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
         return refine_onsets(fix_octave_outliers(v), stems["vocals"])
 
@@ -444,6 +446,12 @@ def build(stems, a, grid):
         parts["vocals"] = melody
         parts["lead"] = [pretty_midi.Note(velocity=n.velocity, pitch=min(n.pitch + 12, 100), start=n.start, end=n.end)
                          for n in melody]
+    if a.accomp == "octave" and parts.get("bass"):
+        # 저음 라인은 마디마다 반복되는 리듬 패턴이므로, 드물게만 나타나는 위치의 소리 시작은 잡음으로 보고 뺀다
+        idx_ = np.arange(len(beats)) - k0
+        slot = lambda n: int(round(float(np.interp(n.start, beats, idx_)) * 4)) % 16
+        h = np.bincount([slot(n) for n in parts["bass"]], minlength=16)
+        parts["bass"] = [n for n in parts["bass"] if h[slot(n)] >= 0.3 * h.max()]
     if "lead" in parts and a.accomp != "octave":          # 보컬과 같은 순간·같은 음이면 중복이라 제거
         v = parts["vocals"]
         parts["lead"] = [n for n in parts["lead"] if n.velocity >= 40 and not any(
