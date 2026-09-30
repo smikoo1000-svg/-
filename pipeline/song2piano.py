@@ -245,6 +245,23 @@ def cached_beat_grid(stems, a):
     return bpm, beats, k0
 
 
+def grid_phase(stems, bpm, beats, k0):
+    """박 추적 격자선과 실제 소리 시작 사이의 평균 어긋남(초). 재생용 MIDI를 원곡에 맞추는 데 쓴다."""
+    import librosa
+    ons = []
+    for k in ("vocals", "other"):
+        y, sr = librosa.load(str(stems[k]), sr=22050, mono=True)
+        ons.append(librosa.onset.onset_detect(y=y, sr=sr, units="time"))
+    on = np.sort(np.concatenate(ons))
+    on = on[(on >= beats[0]) & (on <= beats[-1])]
+    if len(on) < 30:
+        return 0.0
+    idx = np.arange(len(beats)) - k0
+    sl = 60 / bpm / 4
+    dev = np.array([((float(np.interp(t, beats, idx)) * 4 + .5) % 1 - .5) * sl for t in on])
+    return float(np.clip(np.median(dev), -0.05, 0.05))
+
+
 def snap(notes, bpm, beats, k0=0, div=4, shift=None):
     """실제 시각 -> 박 위치(첫 마디 첫 박 기준) -> 16분음표 칸 정렬 -> 고정 템포 시각."""
     if len(beats) < 4:
@@ -409,7 +426,18 @@ def build(stems, a, grid):
             piano.notes.append(n)
         print(f"{name}: {len(ns)} notes")
     pm.instruments.append(piano)
-    return pm
+    # 재생용 MIDI: 원곡의 실제 시간에 맞춘다 (첫 박이 원곡 몇 초인지 + 격자 위상 + 앞쪽 마디 여유 보정)
+    spb = 60 / bpm
+    offset = float(beats[k0]) + grid_phase(stems, bpm, beats, k0) - (shift or 0) * spb
+    pm_audio = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
+    inst = pretty_midi.Instrument(0, name="Piano")
+    for n in piano.notes:
+        st = max(0.0, n.start + offset)
+        inst.notes.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=st,
+                                           end=max(st + 0.03, n.end + offset)))
+    pm_audio.instruments.append(inst)
+    print(f"원곡 시간 보정: MIDI를 {offset:+.3f}초 이동")
+    return pm, pm_audio
 
 
 def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
@@ -460,13 +488,16 @@ def main():
         if fresh is not None:
             separate(stems, fresh, a.model)
         grid = beat_future.result()
-    pm = build(stems, a, grid)
+    pm, pm_audio = build(stems, a, grid)
     stage("MIDI·악보 저장")
     mid = a.out / f"{a.audio.stem}_piano.mid"
-    pm.write(str(mid)); print("MIDI:", mid)
+    pm_audio.write(str(mid)); print("MIDI:", mid)                     # 원곡과 나란히 재생할 수 있게 시간 보정됨
     try:
+        bars = a.out / f".{a.audio.stem}_bars.mid"                    # 악보용: 마디가 정확히 맞는 버전
+        pm.write(str(bars))
         xml = a.out / f"{a.audio.stem}_piano.musicxml"
-        to_score(mid, xml, pm.get_tempo_changes()[1][0]); print("악보:", xml)
+        to_score(bars, xml, pm.get_tempo_changes()[1][0]); print("악보:", xml)
+        bars.unlink(missing_ok=True)
     except Exception as e:
         print("악보 변환 실패(MIDI는 저장됨):", e)
 
