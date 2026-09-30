@@ -1,0 +1,5 @@
+demucs
+basic-pitch[onnx]
+pretty_midi
+music21
+soundfile
