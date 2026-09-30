@@ -735,7 +735,23 @@ def write_timed_midi(notes, beats, path, tpb=480, pedal=None):
     mid.save(str(path))
 
 
-def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
+def reduce_hand(pitches, hand, max_notes=4, max_span=12):
+    """한 손이 한 번에 칠 수 있는 음 조합으로 줄인다. 오른손은 맨 위 음(멜로디), 왼손은 맨 아래 음(베이스)을 반드시 남기고,
+    나머지는 그 음에 가까운 것부터 스팬(최고-최저)이 max_span 이내이고 max_notes개 이하일 때까지만 추가한다."""
+    ps = sorted(set(pitches))
+    if len(ps) <= 1:
+        return ps
+    anchor = ps[-1] if hand == "r" else ps[0]
+    keep = [anchor]
+    for q in sorted((x for x in ps if x != anchor), key=lambda x: abs(x - anchor)):
+        if len(keep) >= max_notes:
+            break
+        if max(keep + [q]) - min(keep + [q]) <= max_span:
+            keep.append(q)
+    return sorted(keep)
+
+
+def to_score(midi_path: Path, xml_path: Path, bpm: float = 100, playable: bool = True):
     from music21 import converter, stream, clef, meter, tempo
     s = converter.parse(str(midi_path), quantizePost=True, quarterLengthDivisors=(4, 3))
     flat = s.flatten()
@@ -763,6 +779,16 @@ def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
     for o, pm_, ql in items:
         side = "r" if pm_ >= split[int(o // 4)] else "l"
         groups.setdefault((side, round(o, 4), round(ql, 4)), []).append(pm_)
+    if playable:                                         # 한 손이 칠 수 있는 음 조합으로 줄이기 (손 크기·손가락 수 제한)
+        byhand = {}
+        for (side, o, ql), ps in groups.items():
+            byhand.setdefault((side, o), []).extend((x, ql) for x in ps)
+        groups = {}
+        for (side, o), lst in byhand.items():
+            keep = set(reduce_hand([x for x, _ in lst], side))
+            for x, ql in lst:
+                if x in keep:
+                    groups.setdefault((side, o, ql), []).append(x)
     for (side, o, ql), ps in groups.items():
         n = chord.Chord(ps) if len(ps) > 1 else note.Note(ps[0])
         n.quarterLength = ql
@@ -795,6 +821,7 @@ def main():
     ap.add_argument("--dynamics", action=B, default=True, help="어택·소리 크기로 음마다 벨로시티 산출")
     ap.add_argument("--harmony", action=B, default=True, help="반주의 화음(다성음) 층을 추가(배음 제거+코드 구성음 필터)")
     ap.add_argument("--pedal", action=B, default=True, help="서스테인 페달(CC64)을 화성 변화에 맞춰 생성")
+    ap.add_argument("--playable", action=B, default=True, help="악보를 한 손으로 칠 수 있게 줄임(동시음 4개·한 옥타브 이내)")
     ap.add_argument("--grid", choices=["auto", "8", "16", "3", "mixed", "32", "off"], default="auto",
                     help="격자: auto=음 위치로 자동 선택, 8=8분, 16=16분, 3=3연음, mixed=16분+3연음, 32=32분, off=정렬 안 함")
     ap.add_argument("--quantize-strength", type=float, default=1.0, help="격자판 MIDI 정렬 강도 0~1 (1=완전, 0.5=반쯤)")
@@ -823,7 +850,7 @@ def main():
         bars = a.out / f".{a.audio.stem}_bars.mid"                    # 악보용: 마디가 정확히 맞는 버전
         pm.write(str(bars))
         xml = a.out / f"{a.audio.stem}_piano.musicxml"
-        to_score(bars, xml, pm.get_tempo_changes()[1][0]); print("악보:", xml)
+        to_score(bars, xml, pm.get_tempo_changes()[1][0], playable=a.playable); print("악보:", xml)
         bars.unlink(missing_ok=True)
     except Exception as e:
         print("악보 변환 실패(MIDI는 저장됨):", e)
