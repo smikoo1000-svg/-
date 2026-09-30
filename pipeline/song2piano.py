@@ -60,20 +60,35 @@ def in_range(notes, lo, hi):
     return [n for n in notes if lo <= n.pitch <= hi]
 
 
-def monophonic(notes, min_len):
-    """겹치는 음 중 큰 음(velocity)만 남기는 단선율화."""
-    notes = sorted((n for n in notes if n.end - n.start >= min_len), key=lambda n: n.start)
-    out = []
-    for n in notes:
-        if out and n.start < out[-1].end:
-            if n.start - out[-1].start >= 0.06:      # 새 음이 시작되면 이전 음을 끊는다
-                out[-1].end = n.start
-                out.append(n)
-            elif n.velocity > out[-1].velocity:      # 거의 동시에 시작하면 큰 쪽만
-                out[-1] = n
+def monophonic(notes, min_len, step=0.01):
+    """단선율화: 매 순간(10ms) 활성 음 중 가장 센 음 하나만 남긴다.
+    (긴 음 도중에 짧은 음이 끼어도 뒤쪽이 사라지지 않는다.) 같은 높이로 이어지면 다시 합친다."""
+    notes = [n for n in notes if n.end > n.start]
+    if not notes:
+        return []
+    T = int(max(n.end for n in notes) / step) + 2
+    owner = np.full(T, -1, int)
+    order = sorted(range(len(notes)), key=lambda i: (notes[i].velocity, notes[i].end - notes[i].start))
+    for i in order:                                   # 센 음이 나중에 덮어쓴다
+        owner[int(notes[i].start / step):int(notes[i].end / step) + 1] = i
+    out, t = [], 0
+    while t < T:
+        if owner[t] < 0:
+            t += 1
             continue
-        out.append(n)
-    return out
+        i, u = owner[t], t
+        while u < T and owner[u] == i:
+            u += 1
+        src = notes[i]
+        out.append(pretty_midi.Note(velocity=src.velocity, pitch=src.pitch, start=t * step, end=u * step))
+        t = u
+    merged = []
+    for n in out:                                     # 같은 높이가 바로 이어지면 하나로
+        if merged and merged[-1].pitch == n.pitch and n.start - merged[-1].end <= 2 * step:
+            merged[-1].end = n.end
+        else:
+            merged.append(n)
+    return [n for n in merged if n.end - n.start >= min_len]
 
 
 def limit_poly(notes, max_poly, min_len, min_vel):
@@ -304,7 +319,7 @@ def main():
     ap.add_argument("audio", type=Path)
     ap.add_argument("-o", "--out", type=Path, default=Path("out"))
     ap.add_argument("--model", default="htdemucs")
-    ap.add_argument("--min-len", type=float, default=0.1, help="보컬 최소 음 길이(초)")
+    ap.add_argument("--min-len", type=float, default=0.06, help="보컬 최소 음 길이(초)")
     ap.add_argument("--accomp-poly", type=int, default=2, help="반주 최대 동시음")
     ap.add_argument("--accomp", choices=["chords", "notes", "none"], default="chords",
                     help="반주 방식: chords=코드 인식(기본, 깔끔), notes=음 전사(복잡), none=멜로디+베이스만")
