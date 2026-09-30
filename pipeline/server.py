@@ -52,7 +52,7 @@ def work(jid, cmd, d):
         if line.startswith("STAGE:"):
             STATE[jid] = dict(status="running", stage=line[6:].strip())
     p.wait()
-    files = sorted(x.name for x in d.glob("*_piano.*"))
+    files = sorted(x.name for x in d.glob("*_piano*.*"))
     if files:
         STATE[jid] = dict(status="done", files=files)
     else:

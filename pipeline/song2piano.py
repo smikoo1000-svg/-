@@ -86,11 +86,30 @@ def transcribe(wav: Path, **kw) -> list:
     return [n for i in midi.instruments for n in i.notes]
 
 
-def merge_same_pitch(notes, gap):
-    """같은 높이의 음이 gap초 이내로 끊겼다 다시 시작하면 하나로 이어 붙인다."""
+_ONS = {}
+
+
+def stem_onsets(wav: Path, delta=0.1):
+    """스템의 (온셋 시각들, 온셋 세기 포락선, 세기 80퍼센타일). 같은 파일이면 재사용."""
+    import librosa
+    k = (str(wav), delta)
+    if k not in _ONS:
+        y, sr = librosa.load(str(wav), sr=22050, mono=True)
+        env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+        on = librosa.onset.onset_detect(onset_envelope=env, sr=sr, hop_length=512, units="time", delta=delta)
+        _ONS[k] = (on, env, float(np.percentile(env, 80)), y, sr)
+    return _ONS[k]
+
+
+def merge_same_pitch(notes, gap, onsets=None):
+    """같은 높이의 음이 gap초 이내로 끊겼다 다시 시작하면 하나로 이어 붙인다.
+    단, 두 번째 음의 시작 지점에 원곡의 실제 소리 시작(온셋)이 있으면 '다시 발음한 음'이라 합치지 않는다."""
+    on = np.asarray(onsets if onsets is not None else [], float)
     out = []
     for n in sorted(notes, key=lambda n: (n.pitch, n.start)):
-        if out and out[-1].pitch == n.pitch and n.start - out[-1].end <= gap:
+        reattack = bool(len(on)) and out and out[-1].pitch == n.pitch and n.start - out[-1].start > 0.08 \
+            and np.min(np.abs(on - n.start)) <= 0.05
+        if out and out[-1].pitch == n.pitch and n.start - out[-1].end <= gap and not reattack:
             out[-1].end = max(out[-1].end, n.end)
             out[-1].velocity = max(out[-1].velocity, n.velocity)
         else:
@@ -131,6 +150,42 @@ def monophonic(notes, min_len, step=0.01):
         else:
             merged.append(n)
     return [n for n in merged if n.end - n.start >= min_len]
+
+
+def fill_missing(notes, wav: Path, lo, hi, default, dur_max=0.3, voiced=False):
+    """원곡에서 강한 소리가 시작하는데 음이 없는 지점에 음을 채운다.
+    음이름은 스템 크로마 최대값, 옥타브는 주변 음에 가장 가까운 곳. 음높이가 불분명한 소리(타악·잡음)는 제외."""
+    import librosa
+    on, env, thr, y, sr = stem_onsets(wav)
+    hop = 512
+    t = np.arange(len(env)) * hop / sr
+    st = np.array(sorted(n.start for n in notes)) if notes else np.array([])
+    ch = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop)
+    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
+    rthr = 0.15 * float(np.percentile(rms, 95))
+    strong = [o for o in on if float(np.interp(o, t, env)) >= thr]
+    added = []
+    for i, o in enumerate(strong):
+        if len(st) and np.min(np.abs(st - o)) <= 0.06:
+            continue
+        fr = min(int(o * sr / hop), ch.shape[1] - 1)
+        fe = min(fr + max(2, int(0.12 * sr / hop)), ch.shape[1])
+        c = ch[:, fr:fe].mean(axis=1)
+        if c.max() < 0.22 * c.sum():                      # 음높이가 분명하지 않은 소리는 건너뜀
+            continue
+        if voiced and rms[min(fr, len(rms) - 1)] < rthr:
+            continue
+        pc = int(np.argmax(c))
+        near = [n.pitch for n in notes if abs(n.start - o) <= 2.0]
+        ref = float(np.median(near)) if near else default
+        cands = [p for p in range(lo, hi + 1) if p % 12 == pc]
+        if not cands:
+            continue
+        p = min(cands, key=lambda x: abs(x - ref))
+        nxt = strong[i + 1] if i + 1 < len(strong) else o + dur_max
+        added.append(pretty_midi.Note(velocity=64, pitch=int(p), start=float(o),
+                                      end=float(max(o + 0.06, min(nxt, o + dur_max)))))
+    return sorted(list(notes) + added, key=lambda n: n.start)
 
 
 def refine_onsets(notes, wav: Path, win=0.07):
@@ -198,6 +253,11 @@ def lowline(stems, lo=None, hi=None, maxdur=0.46):
     yo = librosa.load(str(stems["other"]), sr=sr, mono=True)[0]
     env = librosa.onset.onset_strength(y=yo, sr=sr)
     on = librosa.onset.onset_detect(onset_envelope=env, sr=sr, units="time", delta=0.07)
+    if not os.environ.get("NO_FILL"):                    # 베이스 스템에서만 시작하는 소리도 포함
+        envb = librosa.onset.onset_strength(y=yb, sr=sr)
+        onb = librosa.onset.onset_detect(onset_envelope=envb, sr=sr, units="time", delta=0.1)
+        merged = np.sort(np.concatenate([on, onb]))
+        on = np.array([merged[0]] + [t for p, t in zip(merged, merged[1:]) if t - p > 0.05]) if len(merged) else merged
     if len(on) == 0:
         return []
     ch = librosa.feature.chroma_cqt(y=yb, sr=sr, hop_length=hop)
@@ -417,15 +477,17 @@ def build(stems, a, grid):
     piano = pretty_midi.Instrument(0, name="Piano")
 
     def vocals():
+        von = stem_onsets(stems["vocals"])[0]
         v = monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"],
                           minimum_note_length=float(os.environ.get("BP_MINLEN", 80)),
                           onset_threshold=float(os.environ.get("BP_ONSET", 0.35)),
                           frame_threshold=float(os.environ.get("BP_FRAME", 0.2)), melodia_trick=True,
-                          minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
+                          minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12, von), a.min_len)
         v = fix_octave_outliers(v)
         if os.environ.get("CHROMA_FIX"):
             v = chroma_correct(v, stems["vocals"], float(os.environ["CHROMA_FIX"]))
-        return refine_onsets(v, stems["vocals"])
+        v = refine_onsets(v, stems["vocals"])
+        return fill_missing(v, stems["vocals"], 48, 84, 67, voiced=True) if not os.environ.get("NO_FILL") else v
 
     def bass():
         b = monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
@@ -440,9 +502,11 @@ def build(stems, a, grid):
 
     def lead():
         """반주 스템의 눈에 띄는 리드 선율(신스/기타/카우벨 등). 보컬과 겹치는 음은 뺀다."""
+        oon = stem_onsets(stems["other"])[0]
         l = monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
-                          onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1), 0.08)
-        return refine_onsets(fix_octave_outliers(l), stems["other"])
+                          onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1, oon), 0.08)
+        l = refine_onsets(fix_octave_outliers(l), stems["other"])
+        return fill_missing(l, stems["other"], 60, 96, 72) if not os.environ.get("NO_FILL") else l
 
     def chords():
         spans = recognize_chords(stems, beats)
@@ -519,7 +583,53 @@ def build(stems, a, grid):
                                            end=max(st + 0.03, n.end + offset)))
     pm_audio.instruments.append(inst)
     print(f"원곡 시간 보정: MIDI를 {offset:+.3f}초 이동")
-    return pm, pm_audio
+    raw_notes = [pretty_midi.Note(velocity=min(127, max(40, n.velocity)), pitch=n.pitch, start=n.start, end=n.end)
+                 for ns in parts.values() for n in ns]
+    return pm, pm_audio, raw_notes, beats
+
+
+def write_timed_midi(notes, beats, path, tpb=480):
+    """음을 원곡의 실제 시각 그대로(16분 칸 정렬 없이) 저장한다. 박 추적 결과를 템포 정보(박마다 템포 변화)로
+    함께 써서, 어떤 플레이어로 재생해도 곡 내내 원곡과 박이 붙어 있고, 악보 프로그램에서도 박 줄이 맞는다."""
+    import mido
+    beats = np.asarray(beats, float)
+    ivs = np.diff(beats)
+    idx = np.arange(len(beats), dtype=float)
+
+    def pos(t):                                            # 실제 시각 -> 박 위치(박 단위)
+        if t < beats[0]:
+            return (t - beats[0]) / ivs[0]
+        if t >= beats[-1]:
+            return (len(beats) - 1) + (t - beats[-1]) / ivs[-1]
+        return float(np.interp(t, beats, idx))
+
+    p0 = pos(0.0)                                             # 원곡 0초의 박 위치 (첫 박 앞이면 음수)
+    tick = lambda t: max(0, int(round((pos(t) - p0) * tpb)))   # MIDI 0틱 = 원곡 0초
+    mid = mido.MidiFile(type=1, ticks_per_beat=tpb)
+    tempo_tr = mido.MidiTrack(); mid.tracks.append(tempo_tr)
+    ev = [(0, mido.MetaMessage("set_tempo", tempo=int(round(ivs[0] * 1e6))))]
+    for j, iv in enumerate(ivs):
+        ev.append((max(0, int(round((j - p0) * tpb))), mido.MetaMessage("set_tempo", tempo=int(round(iv * 1e6)))))
+    ev.append((0, mido.MetaMessage("time_signature", numerator=4, denominator=4)))
+    ev.sort(key=lambda e: e[0])
+    last = 0
+    for t_, m in ev:
+        tempo_tr.append(m.copy(time=t_ - last)); last = t_
+    tr = mido.MidiTrack(); mid.tracks.append(tr)
+    tr.append(mido.MetaMessage("track_name", name="Piano", time=0))
+    tr.append(mido.Message("program_change", program=0, channel=0, time=0))
+    evs = []
+    for n in notes:
+        on_, off_ = tick(n.start), tick(max(n.end, n.start + 0.03))
+        off_ = max(off_, on_ + 1)
+        v = int(min(127, max(30, n.velocity)))
+        evs.append((on_, 1, mido.Message("note_on", note=int(n.pitch), velocity=v, channel=0)))
+        evs.append((off_, 0, mido.Message("note_off", note=int(n.pitch), velocity=0, channel=0)))
+    evs.sort(key=lambda e: (e[0], e[1]))
+    last = 0
+    for t_, _, m in evs:
+        tr.append(m.copy(time=t_ - last)); last = t_
+    mid.save(str(path))
 
 
 def to_score(midi_path: Path, xml_path: Path, bpm: float = 100):
@@ -570,10 +680,11 @@ def main():
         if fresh is not None:
             separate(stems, fresh, a.model)
         grid = beat_future.result()
-    pm, pm_audio = build(stems, a, grid)
+    pm, pm_audio, raw_notes, beats_ = build(stems, a, grid)
     stage("MIDI·악보 저장")
     mid = a.out / f"{a.audio.stem}_piano.mid"
-    pm_audio.write(str(mid)); print("MIDI:", mid)                     # 원곡과 나란히 재생할 수 있게 시간 보정됨
+    write_timed_midi(raw_notes, beats_, mid); print("MIDI:", mid)             # 원곡 실제 리듬 + 박마다 템포 (재생용)
+    pm_audio.write(str(a.out / f"{a.audio.stem}_piano_quantized.mid"))         # 16분음표 격자 정렬판(참고용)
     try:
         bars = a.out / f".{a.audio.stem}_bars.mid"                    # 악보용: 마디가 정확히 맞는 버전
         pm.write(str(bars))
