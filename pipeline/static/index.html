@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#4f46e5">
+<title>Song to Piano — 노래를 피아노 악보로</title>
+<meta name="description" content="노래 파일을 올리면 보컬·베이스·반주를 분리하고 박자를 추적해서 피아노 MIDI와 악보로 만들어 드립니다.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎹%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#ffffff;--bg2:#f5f6fb;--card:#ffffff;--fg:#14152b;--mut:#5e6280;--line:#e4e6f2;
+  --acc:#4f46e5;--acc2:#7c3aed;--acc-soft:#eef0ff;--ok:#0f9d6b;--warn:#b7791f;--err:#d64545;
+  --shadow:0 1px 2px rgba(20,21,43,.06),0 8px 24px rgba(20,21,43,.06);
+  --hero:radial-gradient(60% 60% at 80% 0%,#e6e4ff 0%,transparent 70%),radial-gradient(50% 50% at 0% 30%,#dff4ff 0%,transparent 70%);
+  --r:16px;
+}
+:root[data-theme=dark]{
+  --bg:#0d0e1a;--bg2:#131529;--card:#171932;--fg:#eceefb;--mut:#a3a8c8;--line:#262a4a;
+  --acc:#8b85ff;--acc2:#b58cff;--acc-soft:#1f2247;--ok:#3ddc9f;--warn:#f0b955;--err:#ff7b7b;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+  --hero:radial-gradient(60% 60% at 80% 0%,#2a2668 0%,transparent 70%),radial-gradient(50% 50% at 0% 30%,#12354a 0%,transparent 70%);
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0d0e1a;--bg2:#131529;--card:#171932;--fg:#eceefb;--mut:#a3a8c8;--line:#262a4a;
+  --acc:#8b85ff;--acc2:#b58cff;--acc-soft:#1f2247;--ok:#3ddc9f;--warn:#f0b955;--err:#ff7b7b;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+  --hero:radial-gradient(60% 60% at 80% 0%,#2a2668 0%,transparent 70%),radial-gradient(50% 50% at 0% 30%,#12354a 0%,transparent 70%);
+}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 "Pretendard","Apple SD Gothic Neo","Noto Sans KR",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+h1,h2,h3{line-height:1.25;margin:0;letter-spacing:-.02em}
+h2{font-size:clamp(26px,4vw,36px)}h3{font-size:18px}
+p{margin:0}
+.mut{color:var(--mut)}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--acc-soft);color:var(--acc);font-size:13px;font-weight:600}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:12px;padding:12px 20px;font:inherit;font-weight:700;cursor:pointer;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;box-shadow:0 6px 18px rgba(79,70,229,.3);transition:transform .15s,box-shadow .15s,opacity .15s}
+.btn:hover{transform:translateY(-1px);text-decoration:none}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+.btn.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line);box-shadow:none}
+.btn.sm{padding:8px 14px;font-size:14px;border-radius:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+/* 상단 바 */
+header{position:sticky;top:0;z-index:50;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:saturate(1.6) blur(14px);border-bottom:1px solid var(--line)}
+.nav{display:flex;align-items:center;gap:20px;height:64px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;color:var(--fg)}
+.logo span.i{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));font-size:18px}
+.nav nav{display:flex;gap:4px;margin-left:12px}
+.nav nav a{color:var(--mut);padding:8px 12px;border-radius:8px;font-weight:600;font-size:15px}
+.nav nav a:hover{background:var(--bg2);color:var(--fg);text-decoration:none}
+.sp{flex:1}
+.icon{width:38px;height:38px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;font-size:16px}
+/* 히어로 */
+.hero{background:var(--hero),var(--bg);padding:72px 0 40px;text-align:center}
+.hero h1{font-size:clamp(34px,6vw,60px);font-weight:900;margin:16px 0}
+.hero h1 em{font-style:normal;background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p.lead{font-size:clamp(16px,2.2vw,20px);color:var(--mut);max-width:680px;margin:0 auto 28px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;max-width:820px;margin:36px auto 0}
+.kpi{padding:16px 10px;text-align:center}
+.kpi b{display:block;font-size:26px;font-weight:900;color:var(--acc)}.kpi small{color:var(--mut)}
+/* 변환기 */
+section{padding:64px 0}
+section.alt{background:var(--bg2)}
+.sec-h{text-align:center;margin-bottom:36px}.sec-h p{margin-top:10px;color:var(--mut)}
+.conv{display:grid;grid-template-columns:1.1fr .9fr;gap:20px;align-items:start}
+.drop{display:grid;place-items:center;text-align:center;gap:6px;padding:40px 20px;border:2px dashed var(--line);border-radius:var(--r);background:var(--bg2);cursor:pointer;transition:border-color .15s,background .15s}
+.drop:hover,.drop.on{border-color:var(--acc);background:var(--acc-soft)}
+.drop .big{font-size:40px}
+.drop input{display:none}
+.file{display:none;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;margin-top:12px;background:var(--card)}
+.file.show{display:flex}.file b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.pad{padding:22px}
+.opts{display:grid;gap:10px;margin:0;padding:0;border:0}
+.opt{position:relative;display:block}
+.opt input{position:absolute;opacity:0}
+.opt .box{display:block;padding:12px 14px;border:1.5px solid var(--line);border-radius:12px;cursor:pointer;background:var(--card);transition:border-color .12s,background .12s}
+.opt .box b{display:flex;align-items:center;gap:8px}.opt .box small{display:block;color:var(--mut);font-size:13px;line-height:1.45;margin-top:2px}
+.opt input:checked+.box{border-color:var(--acc);background:var(--acc-soft)}
+.opt input:focus-visible+.box{outline:3px solid color-mix(in srgb,var(--acc) 40%,transparent)}
+.tag{font-size:11px;padding:2px 8px;border-radius:999px;background:var(--acc);color:#fff;font-weight:700}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.switch{position:relative;width:46px;height:26px;flex:none}
+.switch input{position:absolute;opacity:0;inset:0;cursor:pointer;z-index:2}
+.switch i{position:absolute;inset:0;border-radius:999px;background:var(--line);transition:.15s}
+.switch i:after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.switch input:checked+i{background:var(--acc)}.switch input:checked+i:after{left:23px}
+details.adv{border-top:1px solid var(--line);padding-top:12px;margin-top:4px}
+details.adv summary{cursor:pointer;font-weight:700;color:var(--mut)}
+.field{display:grid;gap:6px;margin-top:12px;font-size:14px}
+.field select,.field input{padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit}
+/* 진행 */
+.progress{display:none;margin-top:20px}.progress.show{display:block}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.step{padding:12px 10px;border-radius:12px;border:1px solid var(--line);background:var(--card);text-align:center;font-size:13px;color:var(--mut);position:relative;overflow:hidden}
+.step b{display:block;font-size:20px}
+.step.act{border-color:var(--acc);color:var(--fg);background:var(--acc-soft)}
+.step.act:after{content:"";position:absolute;left:0;bottom:0;height:3px;width:40%;background:linear-gradient(90deg,var(--acc),var(--acc2));animation:slide 1.2s infinite ease-in-out}
+.step.done{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 50%,var(--line))}
+@keyframes slide{0%{left:-40%}100%{left:100%}}
+.status{margin-top:12px;font-size:14px;color:var(--mut);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.err{color:var(--err);white-space:pre-wrap;font-size:13px;background:color-mix(in srgb,var(--err) 10%,transparent);padding:12px;border-radius:10px;margin-top:12px}
+/* 결과 */
+.result{display:none;margin-top:28px}.result.show{display:block}
+.res-h{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.player{padding:18px}
+midi-player{display:block;width:100%;--primary-color:var(--acc)}
+midi-visualizer{display:block;margin-top:12px;overflow-x:auto;border-radius:12px;background:var(--bg2)}
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-top:14px}
+.dl a{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;color:var(--fg);background:var(--card);font-weight:600}
+.dl a small{display:block;color:var(--mut);font-weight:400;font-size:12px}
+.dl a:hover{border-color:var(--acc);text-decoration:none}
+#osmd{background:#fff;color:#000;border-radius:12px;padding:10px;overflow-x:auto;margin-top:12px;min-height:60px}
+.note{font-size:13px;color:var(--mut);margin-top:10px}
+/* 기능 카드 */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.feat{padding:22px}.feat .em{display:grid;place-items:center;width:44px;height:44px;border-radius:12px;background:var(--acc-soft);font-size:22px;margin-bottom:12px}
+.feat p{color:var(--mut);font-size:15px;margin-top:6px}
+/* 사용법 */
+.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;counter-reset:s}
+.flow .s{padding:20px;position:relative}
+.flow .s:before{counter-increment:s;content:counter(s);position:absolute;top:-14px;left:18px;width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:grid;place-items:center;font-weight:800;font-size:14px}
+.flow p{color:var(--mut);font-size:14px;margin-top:6px}
+/* 성능 표 */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:12px 10px;text-align:left;border-bottom:1px solid var(--line)}th{color:var(--mut);font-weight:600}
+td.g{color:var(--ok);font-weight:700}
+.tbl{padding:8px 16px;overflow-x:auto}
+/* 기록 */
+.hist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.h-item{padding:14px;display:grid;gap:8px}.h-item b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty{padding:28px;text-align:center;color:var(--mut)}
+/* FAQ */
+.faq{max-width:780px;margin:0 auto;display:grid;gap:10px}
+.faq details{padding:0}.faq summary{cursor:pointer;padding:16px 18px;font-weight:700;list-style:none;display:flex;justify-content:space-between;gap:10px}
+.faq summary:after{content:"+";color:var(--acc);font-size:20px;line-height:1}
+.faq details[open] summary:after{content:"–"}
+.faq .a{padding:0 18px 16px;color:var(--mut);font-size:15px}
+footer{padding:44px 0;border-top:1px solid var(--line);color:var(--mut);font-size:14px}
+.foot{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:24px}
+footer h4{margin:0 0 8px;color:var(--fg);font-size:14px}
+footer a{color:var(--mut);display:block;padding:2px 0}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:12px 18px;border-radius:12px;font-weight:600;z-index:99;display:none;max-width:90vw}
+@media(max-width:900px){
+  .conv{grid-template-columns:1fr}.grid3{grid-template-columns:1fr}.flow{grid-template-columns:1fr 1fr}.kpis{grid-template-columns:1fr 1fr}
+  .foot{grid-template-columns:1fr}.nav nav{display:none}.steps{grid-template-columns:1fr 1fr}
+}
+@media(max-width:520px){.flow{grid-template-columns:1fr}.hero{padding-top:44px}section{padding:44px 0}.nav>.btn{display:none}.nav{gap:10px}}
+.logo,.nav .btn{white-space:nowrap}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="#top"><span class="i">🎹</span>Song to Piano</a>
+    <nav aria-label="주요 메뉴">
+      <a href="#convert">변환하기</a><a href="#features">기능</a><a href="#how">사용법</a><a href="#quality">성능</a><a href="#faq">FAQ</a>
+    </nav>
+    <span class="sp"></span>
+    <button class="icon" id="theme" aria-label="화면 모드 전환" title="화면 모드 전환">🌓</button>
+    <a class="btn sm" href="#convert">시작하기</a>
+  </div>
+</header>
+
+<main id="top">
+<section class="hero" style="padding-bottom:56px">
+  <div class="wrap">
+    <span class="chip">✨ 노래 → 피아노 악보 · 브라우저에서 바로</span>
+    <h1>좋아하는 노래를<br><em>피아노 연주와 악보</em>로</h1>
+    <p class="lead">MP3만 올리면 보컬·베이스·반주를 분리하고, 박자를 추적해서 <b>원곡과 박이 맞는 피아노 MIDI</b>와 <b>악보</b>를 만들어 드려요.</p>
+    <a class="btn" href="#convert">지금 변환하기 →</a>
+    <div class="kpis">
+      <div class="card kpi"><b>0ms</b><small>원곡과 박 어긋남<br>(시험한 3곡)</small></div>
+      <div class="card kpi"><b>97%</b><small>베이스 소리 시작<br>MIDI에 반영</small></div>
+      <div class="card kpi"><b>5가지</b><small>편곡 방식 선택</small></div>
+      <div class="card kpi"><b>3종</b><small>MIDI · 격자판 · 악보</small></div>
+    </div>
+  </div>
+</section>
+
+<section id="convert" class="alt">
+  <div class="wrap">
+    <div class="sec-h"><h2>변환하기</h2><p>파일을 올리고 편곡 방식을 고른 뒤 변환을 누르세요.</p></div>
+    <div class="conv">
+      <div class="card pad">
+        <label class="drop" id="drop" for="file" tabindex="0" role="button" aria-label="오디오 파일 선택">
+          <div class="big">🎵</div>
+          <b>오디오 파일을 끌어다 놓거나 눌러서 선택</b>
+          <small class="mut">mp3 · m4a · wav · ogg · flac · aac (최대 100MB)</small>
+          <input id="file" type="file" accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac,.aac">
+        </label>
+        <div class="file" id="fileInfo"><span style="font-size:22px">🎧</span><b id="fname"></b><span class="mut" id="fsize"></span><button class="btn ghost sm" id="clear" type="button">지우기</button></div>
+        <div class="progress" id="progress" aria-live="polite">
+          <div class="steps" id="steps">
+            <div class="step"><b>📥</b>오디오 준비</div>
+            <div class="step"><b>✂️</b>분리 · 박 추적</div>
+            <div class="step"><b>🎼</b>음 분석</div>
+            <div class="step"><b>💾</b>저장</div>
+          </div>
+          <div class="status"><span id="stage">준비 중…</span><span id="timer">0초</span></div>
+          <div class="note">변환 중에는 창을 닫거나 새로고침하지 마세요. 처음 변환은 몇 분 걸릴 수 있어요.</div>
+        </div>
+        <div class="err" id="error" hidden></div>
+      </div>
+
+      <div class="card pad">
+        <h3 style="margin-bottom:12px">편곡 방식</h3>
+        <fieldset class="opts" style="border:0;padding:0;margin:0">
+          <label class="opt"><input type="radio" name="accomp" value="octave" checked><span class="box"><b>옥타브 편곡 <span class="tag">추천</span></b><small>멜로디를 한 옥타브 위로 겹치고, 마디마다 반복되는 저음 리듬을 더해요.</small></span></label>
+          <label class="opt"><input type="radio" name="accomp" value="lead"><span class="box"><b>코드 + 리드 선율</b><small>코드 화음 위에 반주 악기의 선율을 얹어요.</small></span></label>
+          <label class="opt"><input type="radio" name="accomp" value="chords"><span class="box"><b>코드만</b><small>조용한 반주. 멜로디, 베이스, 화음만 남겨요.</small></span></label>
+          <label class="opt"><input type="radio" name="accomp" value="notes"><span class="box"><b>음 전사</b><small>반주를 음 단위로 그대로 옮겨요(복잡할 수 있음).</small></span></label>
+          <label class="opt"><input type="radio" name="accomp" value="none"><span class="box"><b>멜로디 + 베이스만</b><small>가장 단순한 편곡.</small></span></label>
+        </fieldset>
+        <div class="row" style="margin-top:14px"><div><b>앞 60초만 미리보기</b><div class="mut" style="font-size:13px">긴 곡은 먼저 확인해 보세요. 훨씬 빨라요.</div></div><label class="switch"><input type="checkbox" id="preview"><i></i></label></div>
+        <details class="adv"><summary>고급 설정</summary>
+          <label class="field">박 추적 방식<select id="tracker"><option value="beat_this">Beat This! (추천)</option><option value="librosa">librosa (예전 방식)</option></select></label>
+          <label class="field">BPM 직접 지정 (자동 추정이 틀릴 때만)<input id="bpm" type="number" min="40" max="240" step="0.1" placeholder="비워두면 자동"></label>
+        </details>
+        <button class="btn" id="go" style="width:100%;margin-top:18px" disabled>피아노로 변환</button>
+      </div>
+    </div>
+
+    <div class="result" id="result">
+      <div class="res-h"><h2 style="font-size:26px">✅ 변환 완료</h2><span class="mut" id="resName"></span></div>
+      <div class="card player">
+        <div id="playerBox"><div class="mut">플레이어를 불러오는 중…</div></div>
+        <div class="dl" id="dl"></div>
+        <div class="note">재생 소리는 브라우저에서 합성한 피아노예요. 실제 피아노 음색과는 다를 수 있어요. 저장한 MIDI는 음악 앱이나 MuseScore에서 더 좋은 음색으로 들을 수 있습니다.</div>
+      </div>
+      <div class="card player" style="margin-top:16px">
+        <div class="res-h" style="margin:0"><h3>🎼 악보 미리보기</h3><button class="btn ghost sm" id="moreScore" hidden>전체 악보 보기</button></div>
+        <div id="osmd"><span class="mut">악보를 불러오는 중…</span></div>
+        <div class="note">앞부분 24마디만 먼저 보여드려요. 악보 파일(MusicXML)은 MuseScore에서 열어 편집·인쇄할 수 있어요.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="history">
+  <div class="wrap">
+    <div class="sec-h"><h2>변환 기록</h2><p>이 기기에서 변환한 곡이에요. 서버에 파일이 남아 있는 동안 다시 볼 수 있어요.</p></div>
+    <div id="histBox"></div>
+  </div>
+</section>
+
+<section id="features" class="alt">
+  <div class="wrap">
+    <div class="sec-h"><h2>왜 Song to Piano인가요?</h2><p>단순 변환이 아니라, 들었을 때 어긋나지 않게 만드는 데 집중했어요.</p></div>
+    <div class="grid3">
+      <div class="card feat"><div class="em">⏱️</div><h3>곡 내내 박이 붙어요</h3><p>박 추적 결과를 박마다 템포로 저장해서, 원곡과 나란히 재생해도 밀리거나 빨라지지 않아요.</p></div>
+      <div class="card feat"><div class="em">🎯</div><h3>빠지는 음을 줄여요</h3><p>원곡에서 소리가 시작하는 지점을 찾아 빠진 음을 채우고, 다시 친 같은 음은 합치지 않아요.</p></div>
+      <div class="card feat"><div class="em">🎹</div><h3>피아노다운 편곡</h3><p>정답 편곡과 비교해 고른 옥타브 편곡과 저음 리듬 라인으로 두툼한 피아노 소리를 만들어요.</p></div>
+      <div class="card feat"><div class="em">🎼</div><h3>악보까지 한 번에</h3><p>마디가 맞는 MusicXML 악보를 함께 만들어요. MuseScore로 열어 편집하고 인쇄하세요.</p></div>
+      <div class="card feat"><div class="em">⚡</div><h3>같은 곡은 빠르게</h3><p>음원 분리 결과를 저장해 두어서, 편곡 방식만 바꿔 다시 변환하면 훨씬 빨라요.</p></div>
+      <div class="card feat"><div class="em">🔒</div><h3>내 서버에서 처리</h3><p>파일은 직접 실행한 서버에서만 처리돼요. 외부 서비스로 보내지 않습니다.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="sec-h"><h2>이렇게 만들어져요</h2><p>검증된 오픈소스 모델들을 이어 붙였어요.</p></div>
+    <div class="flow">
+      <div class="card s"><h3>음원 분리</h3><p><b>Demucs</b>가 보컬·베이스·반주를 나눠요.</p></div>
+      <div class="card s"><h3>박·마디 추적</h3><p><b>Beat This!</b>가 박과 마디의 첫 박을 찾아 템포를 정리해요.</p></div>
+      <div class="card s"><h3>음 분석</h3><p><b>Basic Pitch</b>로 멜로디를 뽑고, 소리 시작 지점으로 보정하고 빠진 음을 채워요.</p></div>
+      <div class="card s"><h3>편곡 · 저장</h3><p>옥타브 편곡을 입혀 <b>MIDI와 악보</b>로 저장해요.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="quality" class="alt">
+  <div class="wrap">
+    <div class="sec-h"><h2>얼마나 정확한가요?</h2><p>시험한 3곡 기준이에요. 곡에 따라 달라질 수 있어요.</p></div>
+    <div class="card tbl">
+      <table>
+        <thead><tr><th>곡</th><th>원곡과 박 어긋남</th><th>강한 소리 시작 반영 (보컬 / 베이스)</th><th>정답 편곡과의 일치도(F1)</th></tr></thead>
+        <tbody>
+          <tr><td>몬타주 (하프 편곡 정답)</td><td class="g">0ms</td><td>89% / 98%</td><td>0.54</td></tr>
+          <tr><td>Monitoring</td><td class="g">0ms</td><td>93% / 97%</td><td>0.35</td></tr>
+          <tr><td>Rabbit Hole</td><td class="g">0ms</td><td>87% / 100%</td><td>0.23</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="text-align:center;max-width:720px;margin:14px auto 0">"일치도"는 사람이 만든 정답 편곡과 얼마나 비슷한지예요. 편곡은 사람마다 달라서 100%가 나올 수 없어요. 새로 채운 음에는 잡음이 섞일 수 있습니다.</p>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="wrap">
+    <div class="sec-h"><h2>자주 묻는 질문</h2></div>
+    <div class="faq">
+      <details class="card"><summary>얼마나 오래 걸려요?</summary><div class="a">CPU 기준으로 4분짜리 곡이 몇 분 걸려요. 가장 오래 걸리는 게 음원 분리예요. 같은 곡을 다시 변환하면 분리를 건너뛰어서 훨씬 빨라요. 긴 곡은 “앞 60초만 미리보기”를 먼저 써 보세요.</div></details>
+      <details class="card"><summary>박자가 이상해요</summary><div class="a">기본은 자동 박 추적이에요. 곡의 BPM을 알면 고급 설정에서 직접 넣을 수 있어요. 두 배나 절반으로 잡히는 곡은 이 방법이 가장 확실해요.</div></details>
+      <details class="card"><summary>음이 빠지거나 이상한 음이 있어요</summary><div class="a">편곡 방식을 바꿔서 비교해 보세요. 랩처럼 음높이가 불분명한 구간은 특히 어려워요. 자동 변환은 사람이 채보한 악보와 똑같지 않아요.</div></details>
+      <details class="card"><summary>악보는 어떻게 열어요?</summary><div class="a">MusicXML 파일을 MuseScore(무료)에서 열면 편집하고 PDF로 저장할 수 있어요. 폰에서는 MuseScore 앱을 쓰세요.</div></details>
+      <details class="card"><summary>저작권은요?</summary><div class="a">저작권이 있는 곡은 개인적인 학습·연습 용도로만 쓰시고, 결과물을 배포하거나 판매하기 전에 저작권 관련 규정을 꼭 확인하세요.</div></details>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div><div class="logo" style="margin-bottom:8px"><span class="i">🎹</span>Song to Piano</div>노래를 피아노 MIDI와 악보로 바꾸는 오픈소스 프로젝트예요. 자동 변환 결과는 참고용 초안이에요.</div>
+    <div><h4>메뉴</h4><a href="#convert">변환하기</a><a href="#features">기능</a><a href="#quality">성능</a><a href="#faq">FAQ</a></div>
+    <div><h4>사용한 오픈소스</h4><a href="https://github.com/facebookresearch/demucs" target="_blank" rel="noopener">Demucs</a><a href="https://github.com/spotify/basic-pitch" target="_blank" rel="noopener">Basic Pitch</a><a href="https://github.com/CPJKU/beat_this" target="_blank" rel="noopener">Beat This!</a><a href="https://github.com/opensheetmusicdisplay/opensheetmusicdisplay" target="_blank" rel="noopener">OpenSheetMusicDisplay</a><a href="https://github.com/cifkao/html-midi-player" target="_blank" rel="noopener">html-midi-player</a></div>
+  </div>
+</footer>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const store={get(k,d){try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+/* 테마 */
+(function(){const t=store.get('stp_theme',null);if(t)document.documentElement.dataset.theme=t;
+$('#theme').onclick=()=>{const cur=document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const n=cur==='dark'?'light':'dark';document.documentElement.dataset.theme=n;store.set('stp_theme',n)}})();
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>t.style.display='none',3200)}
+const fmtSize=b=>b>1048576?(b/1048576).toFixed(1)+'MB':Math.round(b/1024)+'KB';
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/* 파일 선택 */
+let file=null;
+function setFile(f){
+  if(!f)return;
+  if(f.size>100*1048576){toast('파일이 너무 커요(최대 100MB)');return}
+  file=f;$('#fname').textContent=f.name;$('#fsize').textContent=fmtSize(f.size);$('#fileInfo').classList.add('show');$('#go').disabled=false;
+}
+$('#file').onchange=e=>setFile(e.target.files[0]);
+$('#clear').onclick=()=>{file=null;$('#file').value='';$('#fileInfo').classList.remove('show');$('#go').disabled=true};
+const drop=$('#drop');
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('on')}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('on')}));
+drop.addEventListener('drop',e=>setFile(e.dataTransfer.files[0]));
+drop.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('#file').click()}});
+/* 진행 단계 */
+const stepOf=s=>/오디오 변환/.test(s)?0:/분석/.test(s)?2:/저장/.test(s)?3:/박|분리|재사용/.test(s)?1:0;
+function setStage(text){
+  $('#stage').textContent=text||'준비 중…';const i=stepOf(text||'');
+  $$('#steps .step').forEach((el,k)=>{el.classList.toggle('done',k<i);el.classList.toggle('act',k===i)});
+}
+/* 변환 */
+let busy=false;
+$('#go').onclick=async()=>{
+  if(!file||busy)return;busy=true;$('#go').disabled=true;
+  $('#error').hidden=true;$('#result').classList.remove('show');$('#progress').classList.add('show');setStage('오디오 변환');
+  const d=new FormData();d.append('file',file);d.append('accomp',document.querySelector('input[name=accomp]:checked').value);
+  d.append('tracker',$('#tracker').value);d.append('bpm',$('#bpm').value);d.append('preview',$('#preview').checked?'1':'');
+  const t0=Date.now();const tm=setInterval(()=>$('#timer').textContent=Math.round((Date.now()-t0)/1000)+'초 경과',1000);
+  try{
+    const x=await fetch('/convert',{method:'POST',body:d}),t=await x.text();let j;
+    try{j=JSON.parse(t)}catch(e){throw Error('서버 응답 오류: '+t.slice(0,150))}
+    if(!x.ok)throw Error(j.error||'요청 실패');
+    for(;;){
+      await new Promise(r=>setTimeout(r,2500));
+      const y=await fetch('/status/'+j.id),k=JSON.parse(await y.text());
+      if(k.status==='done'){$$('#steps .step').forEach(el=>{el.classList.remove('act');el.classList.add('done')});$('#stage').textContent='완료!';
+        addHistory({id:j.id,name:file.name,ts:Date.now()});showResult(j.id,file.name,k.files);break}
+      if(k.status==='error')throw Error(k.error);
+      setStage(k.stage);
+    }
+  }catch(e){const box=$('#error');box.textContent='오류: '+e.message;box.hidden=false;toast('변환 중 오류가 났어요')}
+  clearInterval(tm);busy=false;$('#go').disabled=!file;
+};
+/* 결과 */
+const CDN_PLAYER='https://cdn.jsdelivr.net/combine/npm/tone@14.7.58,npm/@magenta/music@1.23.1/es6/core.js,npm/focus-visible@5,npm/html-midi-player@1.5.0';
+const CDN_OSMD='https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js';
+const loaded={};
+function loadScript(src){return loaded[src]??(loaded[src]=new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>rej(new Error('불러오기 실패'));document.head.appendChild(s)}))}
+let osmd=null,scoreUrl='';
+async function showResult(id,name,files){
+  const base='/jobs/'+id+'/';
+  const mid=files.find(f=>/_piano\.mid$/.test(f)),grid=files.find(f=>/_piano_quantized\.mid$/.test(f)),xml=files.find(f=>/\.musicxml$/.test(f));
+  $('#resName').textContent=name;$('#result').classList.add('show');
+  $('#dl').innerHTML=[
+    mid&&`<a href="${base+mid}" download><span>🎹</span><span>MIDI (재생용)<small>원곡 리듬 그대로</small></span></a>`,
+    grid&&`<a href="${base+grid}" download><span>📐</span><span>MIDI (격자판)<small>16분음표 정렬</small></span></a>`,
+    xml&&`<a href="${base+xml}" download><span>🎼</span><span>악보 (MusicXML)<small>MuseScore에서 열기</small></span></a>`].filter(Boolean).join('');
+  $('#result').scrollIntoView({behavior:'smooth',block:'start'});
+  const box=$('#playerBox');
+  try{
+    await loadScript(CDN_PLAYER);
+    box.innerHTML=`<midi-player src="${base+mid}" sound-font visualizer="#roll"></midi-player><midi-visualizer type="piano-roll" id="roll" src="${base+mid}"></midi-visualizer>`;
+  }catch(e){box.innerHTML='<div class="mut">재생기를 불러오지 못했어요(인터넷 연결 확인). 아래에서 MIDI를 내려받아 들어보세요.</div>'}
+  scoreUrl=xml?base+xml:'';renderScore(24);
+}
+async function renderScore(n){
+  const el=$('#osmd');if(!scoreUrl){el.textContent='악보 파일이 없어요.';return}
+  el.innerHTML='<span class="mut">악보를 불러오는 중…</span>';$('#moreScore').hidden=true;
+  try{
+    await loadScript(CDN_OSMD);
+    el.innerHTML='';osmd=new opensheetmusicdisplay.OpenSheetMusicDisplay(el,{autoResize:true,drawTitle:false,drawingParameters:'compacttight',drawUpToMeasureNumber:n});
+    await osmd.load(scoreUrl);osmd.render();$('#moreScore').hidden=n>=9999;
+  }catch(e){el.innerHTML='<span class="mut">악보 미리보기를 표시하지 못했어요. 아래 악보 파일을 내려받아 MuseScore로 열어 보세요.</span>'}
+}
+$('#moreScore').onclick=()=>{toast('전체 악보를 그리는 중이에요. 곡이 길면 잠시 걸려요');renderScore(9999)};
+/* 기록 */
+function addHistory(it){const h=store.get('stp_hist',[]).filter(x=>x.id!==it.id);h.unshift(it);store.set('stp_hist',h.slice(0,24));renderHistory()}
+function renderHistory(){
+  const h=store.get('stp_hist',[]),box=$('#histBox');
+  if(!h.length){box.innerHTML='<div class="card empty">아직 변환한 곡이 없어요. 위에서 첫 곡을 변환해 보세요 🎶</div>';return}
+  box.innerHTML='<div class="hist">'+h.map(x=>`<div class="card h-item"><b title="${esc(x.name)}">🎵 ${esc(x.name)}</b><span class="mut" style="font-size:13px">${new Date(x.ts).toLocaleString('ko-KR')}</span><div style="display:flex;gap:8px"><button class="btn sm" data-open="${x.id}">다시 보기</button><button class="btn ghost sm" data-del="${x.id}">삭제</button></div></div>`).join('')+'</div>';
+}
+document.addEventListener('click',async e=>{
+  const o=e.target.closest('[data-open]'),d=e.target.closest('[data-del]');
+  if(d){store.set('stp_hist',store.get('stp_hist',[]).filter(x=>x.id!==d.dataset.del));renderHistory()}
+  if(o){try{const r=await fetch('/api/job/'+o.dataset.open);const j=await r.json();
+    if(!r.ok||j.status!=='done')throw Error('파일이 서버에 남아 있지 않아요');
+    showResult(j.id,(j.meta&&j.meta.name)||'이전 변환',j.files)}catch(err){toast(err.message)}}
+});
+renderHistory();
+</script>
+</body>
+</html>
