@@ -39,7 +39,10 @@ python pipeline/server.py      # http://localhost:8000
 
 ### 출력 파일
 - `*_piano.mid` : **재생용.** 원곡의 실제 리듬 그대로 + 박마다 템포 정보를 넣어서, 곡 내내 원곡과 박이 붙어 있음(스윙·3연음도 유지).
-- `*_piano_quantized.mid` : 16분음표 격자에 맞춘 판(참고용).
+- `*_piano_quantized.mid` : 자동 감지한 박자 격자(8분/16분/3연음/혼합/32분)에 맞춘 판. `--quantize-strength 0~1`로 강도 조절.
+- `*_piano_pedal.mid` : 서스테인 페달(CC64 127/0)만 담은 컨트롤러 트랙. 재생용 MIDI에도 같이 들어 있음.
+- `*_piano_analysis.json` : BPM·신뢰도·템포 범위·격자·벨로시티·페달 통계.
+- 옵션: `--harmony --offsets --dynamics --pedal --legato --grid {auto,8,16,3,mixed,32,off}`
 - `*_piano.musicxml` : 악보(마디 정렬).
 
 ### 음이 빠지지 않게 하는 처리

@@ -10,11 +10,13 @@
 """
 import argparse, hashlib, os, shutil, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
+import json
 import numpy as np
 from pathlib import Path
 
 import pretty_midi
 from basic_pitch.inference import predict
+import enhance as H
 
 CACHE = Path(__file__).parent / "cache"       # 같은 파일은 분리/박 추적 결과를 재사용
 _MODEL = None
@@ -392,10 +394,12 @@ def snap(notes, bpm, beats, k0=0, div=4, shift=None):
     raw = [(pos(n.start), pos(n.end), n) for n in notes]
     if shift is None:
         shift = 4 * int(np.ceil(max(0, -min((r[0] for r in raw), default=0)) / 4))  # 마디 단위 여유
+    divs = tuple(div) if isinstance(div, (tuple, list)) else (div,)
+    near = lambda p: min((round(p * d) / d for d in divs), key=lambda g: abs(g - p))
     out = []
     for s0, e0, n in raw:
-        s = round((s0 + shift) * div) / div
-        e = max(round((e0 + shift) * div) / div, s + 1 / div)
+        s = near(s0 + shift)
+        e = max(near(e0 + shift), s + 1 / max(divs))
         out.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=s * spb, end=e * spb))
     return out
 
@@ -487,7 +491,12 @@ def build(stems, a, grid):
         if os.environ.get("CHROMA_FIX"):
             v = chroma_correct(v, stems["vocals"], float(os.environ["CHROMA_FIX"]))
         v = refine_onsets(v, stems["vocals"])
-        return fill_missing(v, stems["vocals"], 48, 84, 67, voiced=True) if not os.environ.get("NO_FILL") else v
+        v = fill_missing(v, stems["vocals"], 48, 84, 67, voiced=True) if not os.environ.get("NO_FILL") else v
+        if a.offsets:
+            v = H.refine_offsets(v, stems["vocals"])
+        if a.legato:
+            v = H.legato(v, a.legato_gap)
+        return H.assign_velocity(v, stems["vocals"], base=84) if a.dynamics else v
 
     def bass():
         b = monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
@@ -506,7 +515,23 @@ def build(stems, a, grid):
         l = monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
                           onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1, oon), 0.08)
         l = refine_onsets(fix_octave_outliers(l), stems["other"])
-        return fill_missing(l, stems["other"], 60, 96, 72) if not os.environ.get("NO_FILL") else l
+        l = fill_missing(l, stems["other"], 60, 96, 72) if not os.environ.get("NO_FILL") else l
+        if a.offsets:
+            l = H.refine_offsets(l, stems["other"])
+        if a.legato:
+            l = H.legato(l, a.legato_gap)
+        return H.assign_velocity(l, stems["other"], base=74) if a.dynamics else l
+
+    def low():
+        b = lowline(stems)
+        if a.offsets:
+            b = H.refine_offsets(b, stems["bass"], pitch_class=True)
+        return H.assign_velocity(b, stems["bass"], base=70) if a.dynamics else b
+
+    def harm_raw():
+        """반주 스템의 다성음(화음) 후보. 배음 오인식을 지우고 코드 구성음 위주로 남기는 건 코드 인식 뒤에 한다."""
+        return in_range(transcribe(stems["other"], minimum_note_length=90, onset_threshold=0.4,
+                                   frame_threshold=0.25), 40, 84)
 
     def chords():
         spans = recognize_chords(stems, beats)
@@ -516,7 +541,7 @@ def build(stems, a, grid):
     stage("보컬·베이스·코드 분석 중 (동시에 처리)")
     tasks = {"vocals": vocals, "bass": bass}
     if a.accomp == "octave":
-        tasks = {"vocals": vocals, "lead": lead, "bass": lambda: lowline(stems)}   # 베이스 파트 = 저음 리듬 라인
+        tasks = {"vocals": vocals, "lead": lead, "bass": low}                      # 베이스 파트 = 저음 리듬 라인
         if os.environ.get("OCT_CHORDS"):
             tasks["chords"] = chords
     elif a.accomp == "notes":
@@ -525,9 +550,15 @@ def build(stems, a, grid):
         tasks["chords"] = chords
         if a.accomp == "lead":
             tasks["lead"] = lead
+    if "chords" not in tasks:
+        tasks["_spans"] = chords                          # 페달(CC64)과 하모니 정리에 쓰는 코드 구간
+    if a.harmony and a.accomp == "octave":
+        tasks["_harm"] = harm_raw
     with ThreadPoolExecutor(len(tasks)) as ex:
         futs = {k: ex.submit(f) for k, f in tasks.items()}
         parts = {k: f.result() for k, f in futs.items()}
+    spans = parts["chords"] if "chords" in parts else parts.pop("_spans", None)
+    harm_notes = parts.pop("_harm", None)
     if "chords" in parts:                                 # 코드 음역을 멜로디 바로 아래로 (뭉개짐 방지)
         mel = [n.pitch for k in ("vocals", "lead") for n in parts.get(k, [])]
         hi = int(np.clip(np.percentile(mel, 25) - 2, 55, 66)) if mel else 64
@@ -544,8 +575,8 @@ def build(stems, a, grid):
             melody = [pretty_midi.Note(velocity=n.velocity, pitch=int(min(max(n.pitch + _ms, 28), 100)),
                                        start=n.start, end=n.end) for n in melody]
         parts["vocals"] = melody
-        parts["lead"] = [pretty_midi.Note(velocity=n.velocity, pitch=min(n.pitch + 12, 100), start=n.start, end=n.end)
-                         for n in melody]
+        parts["lead"] = [pretty_midi.Note(velocity=int(max(20, n.velocity * 0.9)), pitch=min(n.pitch + 12, 100),
+                                          start=n.start, end=n.end) for n in melody]
     if a.accomp == "octave" and parts.get("bass"):
         # 저음 라인은 마디마다 반복되는 리듬 패턴이므로, 드물게만 나타나는 위치의 소리 시작은 잡음으로 보고 뺀다
         idx_ = np.arange(len(beats)) - k0
@@ -560,35 +591,61 @@ def build(stems, a, grid):
         others = [n for k, ns_ in parts.items() if k != "chords" for n in ns_]
         parts["chords"] = [c for c in parts["chords"] if not any(
             o.pitch == c.pitch and o.start < c.end and c.start < o.end for o in others)]
-    shift = None
+    if harm_notes is not None and spans is not None:       # 다성음(화음): 배음 제거 + 코드 구성음 필터 + 중복 제거
+        hn = H.chord_filter(H.suppress_overtones(harm_notes), spans, beats)
+        hn = limit_poly(merge_same_pitch(hn, 0.1, stem_onsets(stems["other"])[0]), 3, 0.12, 25)
+        hn = refine_onsets(hn, stems["other"])
+        if a.offsets:
+            hn = H.refine_offsets(hn, stems["other"])
+        if a.dynamics:
+            hn = [pretty_midi.Note(velocity=int(max(20, n.velocity * 0.78)), pitch=n.pitch, start=n.start, end=n.end)
+                  for n in H.assign_velocity(hn, stems["other"], base=70)]
+        others = [n for k, ns_ in parts.items() for n in ns_]
+        parts["harm"] = [h for h in hn if not any(o.pitch == h.pitch and o.start < h.end and h.start < o.end
+                                                  for o in others)]
     allraw = [n for ns in parts.values() for n in ns]
+    # --- 격자(퀀타이즈) 선택: 자동이면 음 위치를 분석해서 8분/16분/3연음/혼합 중에서 고른다
+    names = {"8": (2,), "16": (4,), "3": (3,), "mixed": (4, 3), "32": (8,)}
+    if a.grid == "auto":
+        divs, gst = H.choose_grid([n.start for n in allraw], beats, k0)
+    else:
+        divs, gst = names.get(a.grid, (4,)), {}
+    print("격자:", H._GRID_NAMES.get(tuple(divs), divs), gst)
+    shift = None
     if allraw:
         first = min(np.interp(n.start, beats, np.arange(len(beats)) - k0) if beats[0] <= n.start <= beats[-1]
                     else (n.start - beats[0]) / (60 / bpm) - k0 for n in allraw)
         shift = 4 * int(np.ceil(max(0, -first) / 4))
     for name, ns in parts.items():
-        for n in snap(ns, bpm, beats, k0, shift=shift):
-            n.velocity = min(127, max(40, n.velocity))
+        for n in snap(ns, bpm, beats, k0, div=divs, shift=shift):
+            n.velocity = min(127, max(1, n.velocity))
             piano.notes.append(n)
         print(f"{name}: {len(ns)} notes")
     pm.instruments.append(piano)
-    # 재생용 MIDI: 원곡의 실제 시간에 맞춘다 (첫 박이 원곡 몇 초인지 + 격자 위상 + 앞쪽 마디 여유 보정)
-    spb = 60 / bpm
-    offset = float(beats[k0]) + grid_phase(stems, bpm, beats, k0) - (shift or 0) * spb
-    pm_audio = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
-    inst = pretty_midi.Instrument(0, name="Piano")
-    for n in piano.notes:
-        st = max(0.0, n.start + offset)
-        inst.notes.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=st,
-                                           end=max(st + 0.03, n.end + offset)))
-    pm_audio.instruments.append(inst)
-    print(f"원곡 시간 보정: MIDI를 {offset:+.3f}초 이동")
-    raw_notes = [pretty_midi.Note(velocity=min(127, max(40, n.velocity)), pitch=n.pitch, start=n.start, end=n.end)
+    raw_notes = [pretty_midi.Note(velocity=min(127, max(1, n.velocity)), pitch=n.pitch, start=n.start, end=n.end)
                  for ns in parts.values() for n in ns]
-    return pm, pm_audio, raw_notes, beats
+    # 격자판(재생용): 실제 시간축에서 격자선 쪽으로 strength만큼 이동 (1.0=완전 정렬, 0=그대로)
+    quant_notes = H.quantize_real_time(raw_notes, beats, k0, divs, 0.0 if a.grid == "off" else a.quantize_strength)
+    # --- 서스테인 페달(CC64): 화성이 바뀌는 지점마다 밟았다 뗌
+    pedal = H.make_pedal(spans, beats, float(beats[-1])) if (a.pedal and spans) else []
+    vel = np.array([n.velocity for n in raw_notes]) if raw_notes else np.array([0])
+    ivs = np.diff(beats)
+    ok = float(np.mean(np.abs(ivs / np.median(ivs) - 1) <= 0.04)) if len(ivs) else 0.0
+    covered = sum(u - d for d, u in pedal)
+    info = dict(
+        bpm=float(bpm), bpm_confidence=round(ok, 3),
+        tempo_range=[round(float(60 / np.quantile(ivs, .95)), 1), round(float(60 / np.quantile(ivs, .05)), 1)],
+        beats=int(len(beats)), first_downbeat_beat=int(k0),
+        grid=H._GRID_NAMES.get(tuple(divs), str(divs)), grid_stats=gst, quantize_strength=float(a.quantize_strength),
+        layers={k: len(v) for k, v in parts.items()},
+        velocity=dict(min=int(vel.min()), median=int(np.median(vel)), max=int(vel.max()), std=round(float(vel.std()), 1)),
+        pedal=dict(enabled=bool(pedal), segments=len(pedal), coverage=round(covered / max(float(beats[-1]), 1e-6), 3),
+                   events=[[round(d, 3), round(u, 3)] for d, u in pedal]),
+        options=dict(accomp=a.accomp, offsets=a.offsets, dynamics=a.dynamics, harmony=a.harmony, pedal=a.pedal, grid=a.grid))
+    return pm, quant_notes, raw_notes, beats, pedal, info
 
 
-def write_timed_midi(notes, beats, path, tpb=480):
+def write_timed_midi(notes, beats, path, tpb=480, pedal=None):
     """음을 원곡의 실제 시각 그대로(16분 칸 정렬 없이) 저장한다. 박 추적 결과를 템포 정보(박마다 템포 변화)로
     함께 써서, 어떤 플레이어로 재생해도 곡 내내 원곡과 박이 붙어 있고, 악보 프로그램에서도 박 줄이 맞는다."""
     import mido
@@ -622,9 +679,12 @@ def write_timed_midi(notes, beats, path, tpb=480):
     for n in notes:
         on_, off_ = tick(n.start), tick(max(n.end, n.start + 0.03))
         off_ = max(off_, on_ + 1)
-        v = int(min(127, max(30, n.velocity)))
+        v = int(min(127, max(1, n.velocity)))
         evs.append((on_, 1, mido.Message("note_on", note=int(n.pitch), velocity=v, channel=0)))
         evs.append((off_, 0, mido.Message("note_off", note=int(n.pitch), velocity=0, channel=0)))
+    for d_, u_ in (pedal or []):                            # 서스테인 페달(CC64): 127=밟음, 0=뗌
+        evs.append((tick(d_), 2, mido.Message("control_change", control=64, value=127, channel=0)))
+        evs.append((max(tick(u_), tick(d_) + 1), -1, mido.Message("control_change", control=64, value=0, channel=0)))
     evs.sort(key=lambda e: (e[0], e[1]))
     last = 0
     for t_, _, m in evs:
@@ -668,6 +728,16 @@ def main():
     ap.add_argument("--tracker", choices=["beat_this", "librosa"], default="beat_this", help="박 추적 방식")
     ap.add_argument("--max-sec", type=float, default=None, help="앞 N초만 변환(빠른 미리보기)")
     ap.add_argument("--bpm", type=float, default=None, help="BPM을 직접 지정(자동 추정이 틀릴 때)")
+    B = argparse.BooleanOptionalAction
+    ap.add_argument("--offsets", action=B, default=True, help="음이 끝나는 시점을 소리 에너지로 정밀화")
+    ap.add_argument("--legato", action=B, default=False, help="멜로디를 다음 음까지 이어 치기(페달과 함께 쓰면 피아노다움)")
+    ap.add_argument("--legato-gap", type=float, default=0.15, help="레가토로 이을 최대 틈(초)")
+    ap.add_argument("--dynamics", action=B, default=True, help="어택·소리 크기로 음마다 벨로시티 산출")
+    ap.add_argument("--harmony", action=B, default=True, help="반주의 화음(다성음) 층을 추가(배음 제거+코드 구성음 필터)")
+    ap.add_argument("--pedal", action=B, default=True, help="서스테인 페달(CC64)을 화성 변화에 맞춰 생성")
+    ap.add_argument("--grid", choices=["auto", "8", "16", "3", "mixed", "32", "off"], default="auto",
+                    help="격자: auto=음 위치로 자동 선택, 8=8분, 16=16분, 3=3연음, mixed=16분+3연음, 32=32분, off=정렬 안 함")
+    ap.add_argument("--quantize-strength", type=float, default=1.0, help="격자판 MIDI 정렬 강도 0~1 (1=완전, 0.5=반쯤)")
     a = ap.parse_args()
     if a.no_accompaniment:
         a.accomp = "none"
@@ -680,11 +750,15 @@ def main():
         if fresh is not None:
             separate(stems, fresh, a.model)
         grid = beat_future.result()
-    pm, pm_audio, raw_notes, beats_ = build(stems, a, grid)
+    pm, quant_notes, raw_notes, beats_, pedal, info = build(stems, a, grid)
     stage("MIDI·악보 저장")
-    mid = a.out / f"{a.audio.stem}_piano.mid"
-    write_timed_midi(raw_notes, beats_, mid); print("MIDI:", mid)             # 원곡 실제 리듬 + 박마다 템포 (재생용)
-    pm_audio.write(str(a.out / f"{a.audio.stem}_piano_quantized.mid"))         # 16분음표 격자 정렬판(참고용)
+    stem_name = a.audio.stem
+    mid = a.out / f"{stem_name}_piano.mid"
+    write_timed_midi(raw_notes, beats_, mid, pedal=pedal); print("MIDI:", mid)              # 원곡 실제 리듬 + 박마다 템포 + 페달
+    write_timed_midi(quant_notes, beats_, a.out / f"{stem_name}_piano_quantized.mid", pedal=pedal)   # 격자 정렬판
+    if pedal:                                                                                      # 페달만 따로 (컨트롤러 데이터)
+        write_timed_midi([], beats_, a.out / f"{stem_name}_piano_pedal.mid", pedal=pedal)
+    (a.out / f"{stem_name}_piano_analysis.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     try:
         bars = a.out / f".{a.audio.stem}_bars.mid"                    # 악보용: 마디가 정확히 맞는 버전
         pm.write(str(bars))

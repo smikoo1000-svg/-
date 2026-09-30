@@ -114,6 +114,9 @@ midi-visualizer{display:block;margin-top:12px;overflow-x:auto;border-radius:12px
 .dl a:hover{border-color:var(--acc);text-decoration:none}
 #osmd{background:#fff;color:#000;border-radius:12px;padding:10px;overflow-x:auto;margin-top:12px;min-height:60px}
 .note{font-size:13px;color:var(--mut);margin-top:10px}
+.ana{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:14px}
+.ana .m{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}
+.ana .m b{display:block;font-size:18px;color:var(--acc)}.ana .m small{color:var(--mut)}
 /* 기능 카드 */
 .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
 .feat{padding:22px}.feat .em{display:grid;place-items:center;width:44px;height:44px;border-radius:12px;background:var(--acc-soft);font-size:22px;margin-bottom:12px}
@@ -219,6 +222,13 @@ footer a{color:var(--mut);display:block;padding:2px 0}
         <details class="adv"><summary>고급 설정</summary>
           <label class="field">박 추적 방식<select id="tracker"><option value="beat_this">Beat This! (추천)</option><option value="librosa">librosa (예전 방식)</option></select></label>
           <label class="field">BPM 직접 지정 (자동 추정이 틀릴 때만)<input id="bpm" type="number" min="40" max="240" step="0.1" placeholder="비워두면 자동"></label>
+          <label class="field">퀀타이즈 격자<select id="grid"><option value="auto">자동 (음 위치를 분석해서 선택)</option><option value="16">16분음표</option><option value="8">8분음표</option><option value="3">3연음</option><option value="mixed">16분 + 3연음 혼합</option><option value="32">32분음표</option><option value="off">정렬 안 함</option></select></label>
+          <label class="field">격자판 정렬 강도 <b id="qv">100%</b><input id="qstrength" type="range" min="0" max="100" value="100"></label>
+          <div class="row"><div><b>음 끝 정밀화</b><div class="mut" style="font-size:13px">소리 에너지가 사라지는 지점에서 음을 끝내요.</div></div><label class="switch"><input type="checkbox" id="offsets" checked><i></i></label></div>
+          <div class="row"><div><b>벨로시티(세기) 분석</b><div class="mut" style="font-size:13px">어택 세기와 소리 크기로 음마다 세기를 정해요.</div></div><label class="switch"><input type="checkbox" id="dynamics" checked><i></i></label></div>
+          <div class="row"><div><b>화음(다성음) 층</b><div class="mut" style="font-size:13px">배음 오인식을 지운 반주 화음을 추가해요.</div></div><label class="switch"><input type="checkbox" id="harmony" checked><i></i></label></div>
+          <div class="row"><div><b>서스테인 페달(CC64)</b><div class="mut" style="font-size:13px">화성이 바뀔 때마다 페달을 밟았다 떼요.</div></div><label class="switch"><input type="checkbox" id="pedal" checked><i></i></label></div>
+          <div class="row"><div><b>멜로디 레가토</b><div class="mut" style="font-size:13px">멜로디를 다음 음까지 이어 쳐요(페달과 함께 쓰면 좋아요).</div></div><label class="switch"><input type="checkbox" id="legato"><i></i></label></div>
         </details>
         <button class="btn" id="go" style="width:100%;margin-top:18px" disabled>피아노로 변환</button>
       </div>
@@ -229,6 +239,7 @@ footer a{color:var(--mut);display:block;padding:2px 0}
       <div class="card player">
         <div id="playerBox"><div class="mut">플레이어를 불러오는 중…</div></div>
         <div class="dl" id="dl"></div>
+        <div class="ana" id="ana"></div>
         <div class="note">재생 소리는 브라우저에서 합성한 피아노예요. 실제 피아노 음색과는 다를 수 있어요. 저장한 MIDI는 음악 앱이나 MuseScore에서 더 좋은 음색으로 들을 수 있습니다.</div>
       </div>
       <div class="card player" style="margin-top:16px">
@@ -331,6 +342,7 @@ function setFile(f){
   file=f;$('#fname').textContent=f.name;$('#fsize').textContent=fmtSize(f.size);$('#fileInfo').classList.add('show');$('#go').disabled=false;
 }
 $('#file').onchange=e=>setFile(e.target.files[0]);
+$('#qstrength').oninput=e=>$('#qv').textContent=e.target.value+'%';
 $('#clear').onclick=()=>{file=null;$('#file').value='';$('#fileInfo').classList.remove('show');$('#go').disabled=true};
 const drop=$('#drop');
 ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('on')}));
@@ -350,6 +362,8 @@ $('#go').onclick=async()=>{
   $('#error').hidden=true;$('#result').classList.remove('show');$('#progress').classList.add('show');setStage('오디오 변환');
   const d=new FormData();d.append('file',file);d.append('accomp',document.querySelector('input[name=accomp]:checked').value);
   d.append('tracker',$('#tracker').value);d.append('bpm',$('#bpm').value);d.append('preview',$('#preview').checked?'1':'');
+  d.append('grid',$('#grid').value);d.append('qstrength',($('#qstrength').value/100).toFixed(2));
+  ['offsets','dynamics','harmony','pedal','legato'].forEach(k=>d.append(k,$('#'+k).checked?'1':'0'));
   const t0=Date.now();const tm=setInterval(()=>$('#timer').textContent=Math.round((Date.now()-t0)/1000)+'초 경과',1000);
   try{
     const x=await fetch('/convert',{method:'POST',body:d}),t=await x.text();let j;
@@ -374,12 +388,20 @@ function loadScript(src){return loaded[src]??(loaded[src]=new Promise((res,rej)=
 let osmd=null,scoreUrl='';
 async function showResult(id,name,files){
   const base='/jobs/'+id+'/';
-  const mid=files.find(f=>/_piano\.mid$/.test(f)),grid=files.find(f=>/_piano_quantized\.mid$/.test(f)),xml=files.find(f=>/\.musicxml$/.test(f));
+  const mid=files.find(f=>/_piano\.mid$/.test(f)),grid=files.find(f=>/_piano_quantized\.mid$/.test(f)),xml=files.find(f=>/\.musicxml$/.test(f)),
+        ped=files.find(f=>/_piano_pedal\.mid$/.test(f)),ana=files.find(f=>/_piano_analysis\.json$/.test(f));
   $('#resName').textContent=name;$('#result').classList.add('show');
   $('#dl').innerHTML=[
     mid&&`<a href="${base+mid}" download><span>🎹</span><span>MIDI (재생용)<small>원곡 리듬 그대로</small></span></a>`,
     grid&&`<a href="${base+grid}" download><span>📐</span><span>MIDI (격자판)<small>16분음표 정렬</small></span></a>`,
-    xml&&`<a href="${base+xml}" download><span>🎼</span><span>악보 (MusicXML)<small>MuseScore에서 열기</small></span></a>`].filter(Boolean).join('');
+    xml&&`<a href="${base+xml}" download><span>🎼</span><span>악보 (MusicXML)<small>MuseScore에서 열기</small></span></a>`,
+    ped&&`<a href="${base+ped}" download><span>🦶</span><span>페달 데이터 (CC64)<small>컨트롤러만 따로</small></span></a>`,
+    ana&&`<a href="${base+ana}" download><span>📊</span><span>분석 결과 (JSON)<small>BPM·격자·페달</small></span></a>`].filter(Boolean).join('');
+  $('#ana').innerHTML='';
+  if(ana){try{const j=await (await fetch(base+ana)).json();const m=(t,b,s)=>`<div class="m"><small>${t}</small><b>${b}</b><small>${s||''}</small></div>`;
+    $('#ana').innerHTML=[m('BPM',j.bpm.toFixed(1),'박 신뢰도 '+Math.round(j.bpm_confidence*100)+'%'),m('템포 변화',j.tempo_range[0]+'~'+j.tempo_range[1],'BPM 범위'),
+      m('격자',j.grid,'퀀타이즈'),m('서스테인 페달',j.pedal.segments+'구간',j.pedal.enabled?'곡의 '+Math.round(j.pedal.coverage*100)+'% 구간':'꺼짐'),
+      m('벨로시티',j.velocity.min+'~'+j.velocity.max,'중앙값 '+j.velocity.median+' · 편차 '+j.velocity.std),m('음 개수',Object.values(j.layers).reduce((a,b)=>a+b,0),Object.entries(j.layers).map(([k,v])=>k+' '+v).join(' · '))].join('')}catch(e){}}
   $('#result').scrollIntoView({behavior:'smooth',block:'start'});
   const box=$('#playerBox');
   try{

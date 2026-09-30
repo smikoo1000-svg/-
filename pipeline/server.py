@@ -57,6 +57,16 @@ def convert():
     trk = request.form.get("tracker", "beat_this")
     cmd += ["--accomp", acc if acc in ("octave", "lead", "chords", "notes", "none") else "octave",
             "--tracker", trk if trk in ("beat_this", "librosa") else "beat_this"]
+    for key in ("offsets", "dynamics", "harmony", "pedal", "legato"):              # 켜기/끄기 옵션
+        val = request.form.get(key)
+        if val in ("0", "1"):
+            cmd.append(f"--{key}" if val == "1" else f"--no-{key}")
+    grid = request.form.get("grid", "auto")
+    cmd += ["--grid", grid if grid in ("auto", "8", "16", "3", "mixed", "32", "off") else "auto"]
+    try:
+        cmd += ["--quantize-strength", str(min(1.0, max(0.0, float(request.form.get("qstrength", "1")))))]
+    except ValueError:
+        pass
     if request.form.get("preview"):
         cmd += ["--max-sec", "60"]
     if request.form.get("bpm", "").replace(".", "", 1).isdigit():
