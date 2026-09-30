@@ -17,7 +17,7 @@ button:disabled{opacity:.5}.c{background:#f3f3f7;border-radius:12px;padding:16px
 <h1>🎹 Song to Piano</h1>
 <p>노래 파일을 올리면 보컬·베이스·반주를 분리해 피아노 MIDI와 악보(MusicXML)로 만들어 줍니다. CPU에서는 곡당 몇 분 걸립니다.</p>
 <div class=c><input type=file id=f accept="audio/*,.mp3,.m4a,.wav,.ogg,.flac,.aac"><div id=n style="color:#666;margin-top:6px"></div><br>
-반주 방식 <select id=ac><option value=chords>코드 반주</option><option value=notes>음 전사(예전 방식)</option><option value=none>없음(멜로디+베이스만)</option></select><br><br>
+반주 방식 <select id=ac><option value=lead>코드 + 리드 선율(기본)</option><option value=chords>코드만</option><option value=notes>음 전사(예전 방식)</option><option value=none>없음(멜로디+베이스만)</option></select><br><br>
 박 추적 <select id=tr><option value=beat_this>Beat This!</option><option value=librosa>librosa(예전 방식)</option></select><br><br>
 <label><input type=checkbox id=pv> 앞 60초만 빠르게 미리보기</label><br><br>
 BPM 직접 지정 <input id=bp type=number placeholder="비우면 자동" style="width:110px"><br><br>
@@ -68,9 +68,9 @@ def convert():
     src = d / ("input" + Path(up.filename or "a.wav").suffix.lower()[:8])
     up.save(src)
     cmd = [sys.executable, str(HERE / "song2piano.py"), str(src), "-o", str(d)]
-    acc = request.form.get("accomp", "chords")
+    acc = request.form.get("accomp", "lead")
     trk = request.form.get("tracker", "beat_this")
-    cmd += ["--accomp", acc if acc in ("chords", "notes", "none") else "chords",
+    cmd += ["--accomp", acc if acc in ("lead", "chords", "notes", "none") else "lead",
             "--tracker", trk if trk in ("beat_this", "librosa") else "beat_this"]
     if request.form.get("preview"):
         cmd += ["--max-sec", "60"]

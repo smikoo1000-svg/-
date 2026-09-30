@@ -330,6 +330,11 @@ def build(stems, a, grid):
                           onset_threshold=0.45, frame_threshold=0.3), 48, 88), 0.2),
                           a.accomp_poly, 0.2, 30)
 
+    def lead():
+        """반주 스템의 눈에 띄는 리드 선율(신스/기타/카우벨 등). 보컬과 겹치는 음은 뺀다."""
+        return monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
+                          onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1), 0.08)
+
     def chords():
         spans = recognize_chords(stems, beats)
         print("chords:", " ".join(f"{_NAMES[r]}{k}" for _, _, r, k in spans[:16]), "…")
@@ -339,11 +344,17 @@ def build(stems, a, grid):
     tasks = {"vocals": vocals, "bass": bass}
     if a.accomp == "notes":
         tasks["other"] = other
-    elif a.accomp == "chords":
+    elif a.accomp in ("chords", "lead"):
         tasks["chords"] = chords
+        if a.accomp == "lead":
+            tasks["lead"] = lead
     with ThreadPoolExecutor(len(tasks)) as ex:
         futs = {k: ex.submit(f) for k, f in tasks.items()}
         parts = {k: f.result() for k, f in futs.items()}
+    if "lead" in parts:                                   # 보컬과 같은 순간·같은 음이면 중복이라 제거
+        v = parts["vocals"]
+        parts["lead"] = [n for n in parts["lead"] if n.velocity >= 40 and not any(
+            x.start < n.end and n.start < x.end and x.pitch % 12 == n.pitch % 12 for x in v)]
     shift = None
     allraw = [n for ns in parts.values() for n in ns]
     if allraw:
@@ -389,8 +400,8 @@ def main():
     ap.add_argument("--model", default="htdemucs")
     ap.add_argument("--min-len", type=float, default=0.06, help="보컬 최소 음 길이(초)")
     ap.add_argument("--accomp-poly", type=int, default=2, help="반주 최대 동시음")
-    ap.add_argument("--accomp", choices=["chords", "notes", "none"], default="chords",
-                    help="반주 방식: chords=코드 인식(기본, 깔끔), notes=음 전사(복잡), none=멜로디+베이스만")
+    ap.add_argument("--accomp", choices=["lead", "chords", "notes", "none"], default="lead",
+                    help="반주 방식: lead=코드+리드 선율(기본), chords=코드만, notes=음 전사(복잡), none=멜로디+베이스만")
     ap.add_argument("--no-accompaniment", action="store_true", help="--accomp none 과 동일")
     ap.add_argument("--tracker", choices=["beat_this", "librosa"], default="beat_this", help="박 추적 방식")
     ap.add_argument("--max-sec", type=float, default=None, help="앞 N초만 변환(빠른 미리보기)")
