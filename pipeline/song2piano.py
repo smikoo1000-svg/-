@@ -164,6 +164,32 @@ def fix_octave_outliers(notes):
     return ns
 
 
+def lowline(stems, lo=48, hi=59, maxdur=0.46):
+    """낮은 음 파트(리듬 위주의 저음 라인). 소리가 시작하는 지점은 반주 스템에서, 음이름은 베이스 스템의
+    크로마(가장 센 음이름)에서 잡아 lo~hi 음역에 놓는다. Basic Pitch로 베이스를 전사하는 것보다
+    정답 편곡과의 일치도가 훨씬 높았다."""
+    import librosa
+    sr, hop = 22050, 512
+    yb = librosa.load(str(stems["bass"]), sr=sr, mono=True)[0]
+    yo = librosa.load(str(stems["other"]), sr=sr, mono=True)[0]
+    env = librosa.onset.onset_strength(y=yo, sr=sr)
+    on = librosa.onset.onset_detect(onset_envelope=env, sr=sr, units="time", delta=0.07)
+    if len(on) == 0:
+        return []
+    ch = librosa.feature.chroma_cqt(y=yb, sr=sr, hop_length=hop)
+    out = []
+    for i, t in enumerate(on):
+        a = int(t * sr / hop)
+        b = a + max(2, int(0.12 * sr / hop))
+        if b >= ch.shape[1]:
+            continue
+        pc = int(np.argmax(ch[:, a:b].mean(axis=1)))
+        end = min(on[i + 1] if i + 1 < len(on) else t + maxdur, t + maxdur)
+        out.append(pretty_midi.Note(velocity=70, pitch=lo + ((pc - lo) % 12), start=float(t),
+                                    end=float(max(end, t + 0.05))))
+    return out
+
+
 def limit_poly(notes, max_poly, min_len, min_vel):
     """반주: 짧은/약한 음 제거, 동시음 max_poly개로 제한."""
     notes = sorted((n for n in notes if n.end - n.start >= min_len and n.velocity >= min_vel), key=lambda n: n.start)
@@ -393,10 +419,10 @@ def build(stems, a, grid):
 
     stage("보컬·베이스·코드 분석 중 (동시에 처리)")
     tasks = {"vocals": vocals, "bass": bass}
-    if a.accomp == "notes":
+    if a.accomp == "octave":
+        tasks = {"vocals": vocals, "lead": lead, "bass": lambda: lowline(stems)}   # 베이스 파트 = 저음 리듬 라인
+    elif a.accomp == "notes":
         tasks["other"] = other
-    elif a.accomp == "octave":
-        tasks["lead"] = lead
     elif a.accomp in ("chords", "lead"):
         tasks["chords"] = chords
         if a.accomp == "lead":
@@ -418,12 +444,6 @@ def build(stems, a, grid):
         parts["vocals"] = melody
         parts["lead"] = [pretty_midi.Note(velocity=n.velocity, pitch=min(n.pitch + 12, 100), start=n.start, end=n.end)
                          for n in melody]
-        def fold(p, lo=48, hi=60):
-            while p < lo: p += 12
-            while p > hi: p -= 12
-            return p
-        parts["bass"] = [pretty_midi.Note(velocity=n.velocity, pitch=fold(n.pitch), start=n.start, end=n.end)
-                         for n in parts["bass"]]
     if "lead" in parts and a.accomp != "octave":          # 보컬과 같은 순간·같은 음이면 중복이라 제거
         v = parts["vocals"]
         parts["lead"] = [n for n in parts["lead"] if n.velocity >= 40 and not any(
