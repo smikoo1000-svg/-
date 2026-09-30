@@ -314,6 +314,23 @@ def unify_beat_level(beats):
     return np.asarray(kept)
 
 
+def fill_beat_gaps(beats, thr=1.35):
+    """박 추적기가 구간 전체를 놓쳐 박 간격이 비정상으로 길어진 곳(예: 4초)에 빠진 박을 균등하게 채운다.
+    그대로 두면 그 구간이 템포 67BPM 같은 값으로 잡혀 악보·격자판이 어긋난다."""
+    b = np.asarray(beats, float)
+    if len(b) < 8:
+        return b
+    iv = np.diff(b)
+    ref = float(np.median(iv))
+    out = [b[0]]
+    for i, v in enumerate(iv):
+        n = int(round(v / ref))
+        if v > thr * ref and n >= 2:
+            out += [b[i] + v * k / n for k in range(1, n)]
+        out.append(b[i + 1])
+    return np.asarray(out)
+
+
 def raw_beats(mix: Path, tracker="beat_this"):
     """박 추적기의 원본 출력(박, 다운비트). 접기/보정 전 값을 캐시에 저장해 둔다."""
     f = mix.with_name(f"rawbeats_{tracker}.npz")
@@ -343,7 +360,7 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
     """박/첫박(다운비트) 추적. 1순위 Beat This!, 실패하면 librosa. -> (bpm, beats, k0)
     k0 = 첫 마디의 첫 박이 beats 배열의 몇 번째인지."""
     beats, downs = raw_beats(mix, tracker)
-    beats = unify_beat_level(beats)
+    beats = fill_beat_gaps(unify_beat_level(beats))
     bpm = 60 * (len(beats) - 1) / float(beats[-1] - beats[0])   # 평균 템포(곡 끝까지 어긋나지 않게)
     while bpm < 80 and len(beats) > 1:               # 너무 느리면 박을 반으로 쪼갬
         beats = np.sort(np.concatenate([beats, (beats[:-1] + beats[1:]) / 2])); bpm *= 2
@@ -377,7 +394,7 @@ def grid_phase(stems, bpm, beats, k0):
     return float(np.clip(np.median(dev), -0.05, 0.05))
 
 
-def snap(notes, bpm, beats, k0=0, div=4, shift=None):
+def snap(notes, bpm, beats, k0=0, div=4, shift=None, phase=0.0):
     """실제 시각 -> 박 위치(첫 마디 첫 박 기준) -> 16분음표 칸 정렬 -> 고정 템포 시각."""
     if len(beats) < 4:
         beats = np.arange(0, 600, 60 / bpm)
@@ -391,7 +408,7 @@ def snap(notes, bpm, beats, k0=0, div=4, shift=None):
             return idx[-1] + (t - beats[-1]) / spb
         return float(np.interp(t, beats, idx))
 
-    raw = [(pos(n.start), pos(n.end), n) for n in notes]
+    raw = [(pos(n.start) - phase, pos(n.end) - phase, n) for n in notes]
     if shift is None:
         shift = 4 * int(np.ceil(max(0, -min((r[0] for r in raw), default=0)) / 4))  # 마디 단위 여유
     divs = tuple(div) if isinstance(div, (tuple, list)) else (div,)
@@ -603,6 +620,30 @@ def build(stems, a, grid):
         others = [n for k, ns_ in parts.items() for n in ns_]
         parts["harm"] = [h for h in hn if not any(o.pitch == h.pitch and o.start < h.end and h.start < o.end
                                                   for o in others)]
+    # --- 단일 악기(피아노 솔로 등) 감지: 보컬/반주/베이스 스템이 같은 소리를 나눠 잡으면 같은 음이 여러 층에 겹친다.
+    #     겹침이 많으면 멜로디 층을 우선으로 하고 베이스·화음 층에서 같은 시각의 같은 음이름(배음 중복)을 지운다.
+    if "vocals" in parts and ("bass" in parts or "harm" in parts):
+        mel = sorted(parts["vocals"], key=lambda n: n.start)
+        ms = np.array([n.start for n in mel]) if mel else np.array([])
+
+        def _dup(n, tol=0.05):
+            if not len(ms):
+                return False
+            i = int(np.searchsorted(ms, n.start - tol))
+            while i < len(mel) and mel[i].start <= n.start + tol:
+                if mel[i].pitch % 12 == n.pitch % 12:
+                    return True
+                i += 1
+            return False
+        low_ = parts.get("bass", []) + parts.get("harm", [])
+        frac = float(np.mean([_dup(n) for n in low_])) if low_ else 0.0
+        print(f"층 겹침 비율: {frac:.0%}")
+        if frac >= float(os.environ.get("SOLO_DUP", 0.25)):
+            for k in ("bass", "harm"):
+                if k in parts:
+                    before = len(parts[k])
+                    parts[k] = [n for n in parts[k] if not _dup(n)]
+                    print(f"단일 악기 모드: {k} {before}->{len(parts[k])} (겹친 음 제거)")
     allraw = [n for ns in parts.values() for n in ns]
     # --- 격자(퀀타이즈) 선택: 자동이면 음 위치를 분석해서 8분/16분/3연음/혼합 중에서 고른다
     names = {"8": (2,), "16": (4,), "3": (3,), "mixed": (4, 3), "32": (8,)}
@@ -611,13 +652,15 @@ def build(stems, a, grid):
     else:
         divs, gst = names.get(a.grid, (4,)), {}
     print("격자:", H._GRID_NAMES.get(tuple(divs), divs), gst)
+    phase, phr = H.estimate_phase([n.start for n in allraw], beats, max(divs)) if a.grid != "off" else (0.0, 0.0)
+    print(f"격자 위상 보정: {phase * 60 / bpm * 1000:+.0f}ms (집중도 {phr:.2f})")
     shift = None
     if allraw:
         first = min(np.interp(n.start, beats, np.arange(len(beats)) - k0) if beats[0] <= n.start <= beats[-1]
                     else (n.start - beats[0]) / (60 / bpm) - k0 for n in allraw)
         shift = 4 * int(np.ceil(max(0, -first) / 4))
     for name, ns in parts.items():
-        for n in snap(ns, bpm, beats, k0, div=divs, shift=shift):
+        for n in snap(ns, bpm, beats, k0, div=divs, shift=shift, phase=phase):
             n.velocity = min(127, max(1, n.velocity))
             piano.notes.append(n)
         print(f"{name}: {len(ns)} notes")
@@ -625,7 +668,7 @@ def build(stems, a, grid):
     raw_notes = [pretty_midi.Note(velocity=min(127, max(1, n.velocity)), pitch=n.pitch, start=n.start, end=n.end)
                  for ns in parts.values() for n in ns]
     # 격자판(재생용): 실제 시간축에서 격자선 쪽으로 strength만큼 이동 (1.0=완전 정렬, 0=그대로)
-    quant_notes = H.quantize_real_time(raw_notes, beats, k0, divs, 0.0 if a.grid == "off" else a.quantize_strength)
+    quant_notes = H.quantize_real_time(raw_notes, beats, k0, divs, 0.0 if a.grid == "off" else a.quantize_strength, phase)
     # --- 서스테인 페달(CC64): 화성이 바뀌는 지점마다 밟았다 뗌
     pedal = H.make_pedal(spans, beats, float(beats[-1])) if (a.pedal and spans) else []
     vel = np.array([n.velocity for n in raw_notes]) if raw_notes else np.array([0])
@@ -636,7 +679,7 @@ def build(stems, a, grid):
         bpm=float(bpm), bpm_confidence=round(ok, 3),
         tempo_range=[round(float(60 / np.quantile(ivs, .95)), 1), round(float(60 / np.quantile(ivs, .05)), 1)],
         beats=int(len(beats)), first_downbeat_beat=int(k0),
-        grid=H._GRID_NAMES.get(tuple(divs), str(divs)), grid_stats=gst, quantize_strength=float(a.quantize_strength),
+        grid=H._GRID_NAMES.get(tuple(divs), str(divs)), grid_stats=gst, grid_phase_ms=round(phase * 60 / bpm * 1000, 1), quantize_strength=float(a.quantize_strength),
         layers={k: len(v) for k, v in parts.items()},
         velocity=dict(min=int(vel.min()), median=int(np.median(vel)), max=int(vel.max()), std=round(float(vel.std()), 1)),
         pedal=dict(enabled=bool(pedal), segments=len(pedal), coverage=round(covered / max(float(beats[-1]), 1e-6), 3),

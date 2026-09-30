@@ -267,7 +267,24 @@ def snap_grid(notes, beats, k0, divs=(4,), strength=1.0, shift=0):
     return out
 
 
-def quantize_real_time(notes, beats, k0, divs=(4,), strength=1.0):
+def estimate_phase(times, beats, div=4, min_r=0.3, max_ms=60):
+    """음 시작들이 박 격자선에서 일정하게 벗어나 있는 양(박 단위)을 원형 평균으로 구한다.
+    박 추적 결과가 실제 소리보다 수십 ms 앞서는 경우가 많아서, 격자를 이만큼 옮기면 음이 격자에 맞는 비율이 크게 오른다.
+    음들이 격자에 모여 있지 않으면(집중도 < min_r) 0을 돌려준다. 반환: (phase_beats, 집중도)"""
+    bt = np.asarray(beats, float)
+    ts = np.asarray([t for t in times if bt[0] + 0.1 <= t <= bt[-1] - 0.1], float)
+    if len(ts) < 40:
+        return 0.0, 0.0
+    pos = np.interp(ts, bt, np.arange(len(bt), dtype=float))
+    z = np.exp(2j * np.pi * div * pos).mean()
+    r, ph = float(abs(z)), float(np.angle(z) / (2 * np.pi * div))
+    spb = float(np.median(np.diff(bt)))
+    if r < min_r or abs(ph) * spb * 1000 > max_ms:
+        return 0.0, r
+    return ph, r
+
+
+def quantize_real_time(notes, beats, k0, divs=(4,), strength=1.0, phase=0.0):
     """실제 시간축에서 음의 시작/끝을 박 격자선 쪽으로 strength(0~1)만큼 옮긴다.
     격자선은 박 추적 결과(박마다 달라지는 템포)를 따라가므로 원곡과 붙은 채로 정렬된다."""
     if strength <= 0 or not notes:
@@ -294,8 +311,8 @@ def quantize_real_time(notes, beats, k0, divs=(4,), strength=1.0):
         return p + strength * (g - p)
     out = []
     for n in notes:
-        s = to_time(near(to_pos(n.start)))
-        e = max(to_time(near(to_pos(n.end))), s + 0.03)
+        s = to_time(near(to_pos(n.start) - phase) + phase)
+        e = max(to_time(near(to_pos(n.end) - phase) + phase), s + 0.03)
         out.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=max(0.0, s), end=max(e, s + 0.03)))
     return out
 
