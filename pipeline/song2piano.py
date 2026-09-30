@@ -212,7 +212,7 @@ def unify_beat_level(beats):
     if len(beats) < 8:
         return beats
     ref = float(np.median(np.diff(beats)))
-    while 60 / ref > 160:
+    while 60 / ref > float(os.environ.get('BPM_MAX', 160)):
         ref *= 2
     while 60 / ref < 80:
         ref /= 2
@@ -228,9 +228,12 @@ def unify_beat_level(beats):
     return np.asarray(kept)
 
 
-def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
-    """박/첫박(다운비트) 추적. 1순위 Beat This!, 실패하면 librosa. -> (bpm, beats, k0)
-    k0 = 첫 마디의 첫 박이 beats 배열의 몇 번째인지."""
+def raw_beats(mix: Path, tracker="beat_this"):
+    """박 추적기의 원본 출력(박, 다운비트). 접기/보정 전 값을 캐시에 저장해 둔다."""
+    f = mix.with_name(f"rawbeats_{tracker}.npz")
+    if f.exists():
+        z = np.load(f)
+        return z["beats"], z["downs"]
     beats = downs = None
     try:
         if tracker != "beat_this":
@@ -246,11 +249,19 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
         y, sr = librosa.load(str(mix), sr=22050, mono=True)
         _, beats = librosa.beat.beat_track(y=y, sr=sr, units="time", tightness=100)
         beats, downs = np.asarray(beats, float), np.asarray([], float)
+    np.savez(f, beats=beats, downs=downs)
+    return beats, downs
+
+
+def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
+    """박/첫박(다운비트) 추적. 1순위 Beat This!, 실패하면 librosa. -> (bpm, beats, k0)
+    k0 = 첫 마디의 첫 박이 beats 배열의 몇 번째인지."""
+    beats, downs = raw_beats(mix, tracker)
     beats = unify_beat_level(beats)
     bpm = 60 * (len(beats) - 1) / float(beats[-1] - beats[0])   # 평균 템포(곡 끝까지 어긋나지 않게)
     while bpm < 80 and len(beats) > 1:               # 너무 느리면 박을 반으로 쪼갬
         beats = np.sort(np.concatenate([beats, (beats[:-1] + beats[1:]) / 2])); bpm *= 2
-    while bpm > 160:                                  # 너무 빠르면 박을 2개씩 묶음
+    while bpm > float(os.environ.get('BPM_MAX', 160)):                                  # 너무 빠르면 박을 2개씩 묶음
         beats = beats[::2]; bpm /= 2
     if bpm_override:                                  # 사용자가 준 BPM: 첫 박부터 균일 격자
         bpm = float(bpm_override)
@@ -260,15 +271,7 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
 
 
 def cached_beat_grid(stems, a):
-    if a.bpm:
-        return beat_grid(stems["mix"], a.bpm, a.tracker)
-    f = stems["mix"].with_name(f"beats_{a.tracker}.npz")
-    if f.exists():
-        z = np.load(f)
-        return float(z["bpm"]), z["beats"], int(z["k0"])
-    bpm, beats, k0 = beat_grid(stems["mix"], None, a.tracker)
-    np.savez(f, bpm=bpm, beats=beats, k0=k0)
-    return bpm, beats, k0
+    return beat_grid(stems["mix"], a.bpm, a.tracker)
 
 
 def grid_phase(stems, bpm, beats, k0):
