@@ -9,6 +9,7 @@
 사용:  python song2piano.py song.mp3 -o out/
 """
 import argparse, subprocess, sys, tempfile
+import numpy as np
 from pathlib import Path
 
 import pretty_midi
@@ -33,7 +34,9 @@ def separate(audio: Path, work: Path, model: str) -> dict:
     audio = to_wav(audio, work)
     subprocess.run([sys.executable, "-m", "demucs", "-n", model, "-o", str(work), str(audio)], check=True)
     d = work / model / audio.stem
-    return {n: d / f"{n}.wav" for n in ("vocals", "bass", "other")}
+    stems = {n: d / f"{n}.wav" for n in ("vocals", "bass", "other")}
+    stems["mix"] = audio
+    return stems
 
 
 def transcribe(wav: Path, **kw) -> list:
@@ -47,9 +50,11 @@ def monophonic(notes, min_len):
     out = []
     for n in notes:
         if out and n.start < out[-1].end:
-            if n.velocity > out[-1].velocity and n.start - out[-1].start > 0.05:
+            if n.start - out[-1].start >= 0.06:      # 새 음이 시작되면 이전 음을 끊는다
                 out[-1].end = n.start
                 out.append(n)
+            elif n.velocity > out[-1].velocity:      # 거의 동시에 시작하면 큰 쪽만
+                out[-1] = n
             continue
         out.append(n)
     return out
@@ -70,24 +75,64 @@ def limit_poly(notes, max_poly, min_len, min_vel):
     return keep
 
 
+def beat_grid(mix: Path):
+    """librosa로 박을 추적. 템포를 80~160 BPM 범위로 접고 박 시각을 맞춰 준다."""
+    import librosa
+    y, sr = librosa.load(str(mix), sr=22050, mono=True)
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, units="time", tightness=100)
+    bpm, beats = float(np.atleast_1d(tempo)[0]), np.asarray(beats, float)
+    while bpm < 80 and len(beats) > 1:               # 너무 느리면 박을 반으로 쪼갬
+        beats = np.sort(np.concatenate([beats, (beats[:-1] + beats[1:]) / 2])); bpm *= 2
+    while bpm > 160:                                  # 너무 빠르면 박을 2개씩 묶음
+        beats = beats[::2]; bpm /= 2
+    return bpm, beats
+
+
+def snap(notes, bpm, beats, div=4):
+    """실제 시각 -> 박 위치 -> 16분음표 칸에 정렬 -> 고정 템포 시각으로 되돌림."""
+    if len(beats) < 4:
+        beats = np.arange(0, 600, 60 / bpm)
+    idx = np.arange(len(beats))
+    spb = 60 / bpm
+
+    def pos(t):
+        if t <= beats[0]:
+            return (t - beats[0]) / spb
+        if t >= beats[-1]:
+            return idx[-1] + (t - beats[-1]) / spb
+        return float(np.interp(t, beats, idx))
+
+    raw = [(pos(n.start), pos(n.end), n) for n in notes]
+    shift = 4 * int(np.ceil(max(0, -min((r[0] for r in raw), default=0)) / 4))  # 마디 단위 여유
+    out = []
+    for s0, e0, n in raw:
+        s = round((s0 + shift) * div) / div
+        e = max(round((e0 + shift) * div) / div, s + 1 / div)
+        out.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=s * spb, end=e * spb))
+    return out
+
+
 def build(stems, a):
-    pm = pretty_midi.PrettyMIDI()
+    bpm, beats = beat_grid(stems["mix"])
+    print(f"tempo: {bpm:.1f} BPM, beats: {len(beats)}")
+    pm = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
     piano = pretty_midi.Instrument(0, name="Piano")
     parts = {
-        "vocals": monophonic(transcribe(stems["vocals"], minimum_note_length=100, onset_threshold=0.5,
-                                        frame_threshold=0.3, melodia_trick=True,
-                                        minimum_frequency=130, maximum_frequency=1100), a.min_len),
-        "bass": monophonic(transcribe(stems["bass"], minimum_note_length=120, minimum_frequency=35,
-                                      maximum_frequency=350), 0.12),
-        "other": limit_poly(transcribe(stems["other"], minimum_note_length=150, onset_threshold=0.55,
-                                       frame_threshold=0.35), a.accomp_poly, 0.15, 45),
+        "vocals": monophonic(transcribe(stems["vocals"], minimum_note_length=80, onset_threshold=0.35,
+                                        frame_threshold=0.2, melodia_trick=True,
+                                        minimum_frequency=100, maximum_frequency=1200), a.min_len),
+        "bass": monophonic(transcribe(stems["bass"], minimum_note_length=90, onset_threshold=0.4,
+                                      frame_threshold=0.25, minimum_frequency=35,
+                                      maximum_frequency=350), 0.1),
+        "other": limit_poly(transcribe(stems["other"], minimum_note_length=100, onset_threshold=0.45,
+                                       frame_threshold=0.3), a.accomp_poly, 0.1, 30),
     }
     for name, ns in parts.items():
         if name == "other" and a.no_accompaniment:
             continue
-        for n in ns:
-            piano.notes.append(pretty_midi.Note(velocity=min(127, max(40, n.velocity)), pitch=n.pitch,
-                                                start=n.start, end=n.end))
+        for n in snap(ns, bpm, beats):
+            n.velocity = min(127, max(40, n.velocity))
+            piano.notes.append(n)
         print(f"{name}: {len(ns)} notes")
     pm.instruments.append(piano)
     return pm
