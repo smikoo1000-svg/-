@@ -49,7 +49,7 @@ def convert():
     p = subprocess.run(cmd, capture_output=True, text=True)
     files = sorted(x.name for x in d.glob("*_piano.*"))
     if not files:
-        return jsonify(error=(p.stderr or p.stdout)[-300:]), 500
+        return jsonify(error=(p.stderr or p.stdout)[-1500:]), 500
     return jsonify(id=jid, files=files)
 
 @app.get("/jobs/<jid>/<name>")

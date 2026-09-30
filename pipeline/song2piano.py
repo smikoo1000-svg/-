@@ -15,7 +15,22 @@ import pretty_midi
 from basic_pitch.inference import predict
 
 
+def to_wav(audio: Path, work: Path) -> Path:
+    """mp3/m4a 등을 wav로 변환 (Demucs의 디코더 의존성 문제 회피)."""
+    import soundfile as sf
+    out = work / f"{audio.stem}.wav"
+    try:
+        data, sr = sf.read(str(audio), always_2d=True)
+    except Exception:
+        import librosa
+        y, sr = librosa.load(str(audio), sr=None, mono=False)
+        data = (y if y.ndim > 1 else y[None]).T
+    sf.write(str(out), data, sr, subtype="PCM_16")
+    return out
+
+
 def separate(audio: Path, work: Path, model: str) -> dict:
+    audio = to_wav(audio, work)
     subprocess.run([sys.executable, "-m", "demucs", "-n", model, "-o", str(work), str(audio)], check=True)
     d = work / model / audio.stem
     return {n: d / f"{n}.wav" for n in ("vocals", "bass", "other")}
