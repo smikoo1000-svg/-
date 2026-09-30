@@ -133,6 +133,22 @@ def monophonic(notes, min_len, step=0.01):
     return [n for n in merged if n.end - n.start >= min_len]
 
 
+def refine_onsets(notes, wav: Path, win=0.07):
+    """Basic Pitch가 잡은 음 시작 시각은 ±50ms쯤 흔들린다. 해당 스템에서 실제로 소리가 시작하는
+    지점(온셋)을 찾아 win초 안이면 그 위치로 옮겨서 16분 칸 정렬이 밀리지 않게 한다."""
+    import librosa
+    y, sr = librosa.load(str(wav), sr=22050, mono=True)
+    ref = librosa.onset.onset_detect(y=y, sr=sr, units="time")
+    if len(ref) == 0:
+        return notes
+    out = []
+    for n in notes:
+        t = float(ref[np.argmin(np.abs(ref - n.start))])
+        s0 = t if abs(t - n.start) <= win and t < n.end - 0.02 else n.start
+        out.append(pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=s0, end=n.end))
+    return sorted(out, key=lambda n: n.start)
+
+
 def limit_poly(notes, max_poly, min_len, min_vel):
     """반주: 짧은/약한 음 제거, 동시음 max_poly개로 제한."""
     notes = sorted((n for n in notes if n.end - n.start >= min_len and n.velocity >= min_vel), key=lambda n: n.start)
@@ -316,14 +332,16 @@ def build(stems, a, grid):
     piano = pretty_midi.Instrument(0, name="Piano")
 
     def vocals():
-        return monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
+        v = monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
                           onset_threshold=0.35, frame_threshold=0.2, melodia_trick=True,
                           minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
+        return refine_onsets(v, stems["vocals"])
 
     def bass():
-        return monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
+        b = monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
                           onset_threshold=0.4, frame_threshold=0.25, minimum_frequency=35,
                           maximum_frequency=350), 28, 60), 0.15), 0.1)
+        return refine_onsets(b, stems["bass"])
 
     def other():
         return limit_poly(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=100,
@@ -332,8 +350,9 @@ def build(stems, a, grid):
 
     def lead():
         """반주 스템의 눈에 띄는 리드 선율(신스/기타/카우벨 등). 보컬과 겹치는 음은 뺀다."""
-        return monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
+        l = monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
                           onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1), 0.08)
+        return refine_onsets(l, stems["other"])
 
     def chords():
         spans = recognize_chords(stems, beats)
