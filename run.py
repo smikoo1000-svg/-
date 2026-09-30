@@ -21,11 +21,14 @@ def find_uv():
 
 
 uv = find_uv()
-if not py.exists():
-    run(uv, "venv", "--python", "3.11", venv)
+check = "import pkg_resources, torch, torchaudio, pretty_midi, demucs, basic_pitch, music21, flask"
+ok = lambda: py.exists() and subprocess.run([str(py), "-c", check], cwd=root, capture_output=True).returncode == 0
 
-check = "import pkg_resources, pretty_midi, demucs, basic_pitch, music21, flask"
-if subprocess.run([str(py), "-c", check], cwd=root, capture_output=True).returncode != 0:
+if not ok():
+    if venv.exists():
+        print("설치가 깨져 있어서 환경을 새로 만듭니다…")
+        shutil.rmtree(venv)
+    run(uv, "venv", "--python", "3.11", venv)
     print("패키지 설치 중… (처음엔 몇 분 걸려요, Ctrl+C 누르지 마세요)")
     # GPU(CUDA)용 대용량 torch 대신 CPU용을 먼저 설치
     run(uv, "pip", "install", "--python", py, "torch", "torchaudio",
