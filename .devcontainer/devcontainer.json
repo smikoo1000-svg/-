@@ -1,0 +1,6 @@
+{
+  "name": "Song to Piano",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r pipeline/requirements.txt",
+  "forwardPorts": [8000]
+}
