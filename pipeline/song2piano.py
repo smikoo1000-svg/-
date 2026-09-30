@@ -8,15 +8,23 @@
 
 사용:  python song2piano.py song.mp3 -o out/
 """
-import argparse, subprocess, sys, tempfile
+import argparse, hashlib, shutil, subprocess, sys, tempfile
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from pathlib import Path
 
 import pretty_midi
 from basic_pitch.inference import predict
 
+CACHE = Path(__file__).parent / "cache"       # 같은 파일은 분리/박 추적 결과를 재사용
+_MODEL = None
 
-def to_wav(audio: Path, work: Path) -> Path:
+
+def stage(msg):
+    print(f"STAGE: {msg}", flush=True)         # 웹 화면이 진행 단계를 보여주는 데 사용
+
+
+def to_wav(audio: Path, work: Path, max_sec=None) -> Path:
     """mp3/m4a 등을 wav로 변환 (Demucs의 디코더 의존성 문제 회피)."""
     import soundfile as sf
     out = work / f"{audio.stem}.wav"
@@ -26,21 +34,55 @@ def to_wav(audio: Path, work: Path) -> Path:
         import librosa
         y, sr = librosa.load(str(audio), sr=None, mono=False)
         data = (y if y.ndim > 1 else y[None]).T
+    if max_sec:
+        data = data[:int(max_sec * sr)]
     sf.write(str(out), data, sr, subtype="PCM_16")
     return out
 
 
-def separate(audio: Path, work: Path, model: str) -> dict:
-    audio = to_wav(audio, work)
-    subprocess.run([sys.executable, "-m", "demucs", "-n", model, "-o", str(work), str(audio)], check=True)
-    d = work / model / audio.stem
-    stems = {n: d / f"{n}.wav" for n in ("vocals", "bass", "other")}
-    stems["mix"] = audio
-    return stems
+def file_key(audio: Path, model: str, max_sec) -> str:
+    h = hashlib.sha1()
+    with open(audio, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    h.update(f"{model}|{max_sec}".encode())
+    return h.hexdigest()[:16]
+
+
+def prepare(audio: Path, model: str, max_sec):
+    """wav 변환 + Demucs 분리를 하고 결과를 캐시에 저장. 같은 파일이면 바로 재사용."""
+    d = CACHE / file_key(audio, model, max_sec)
+    names = ("vocals", "bass", "other", "mix")
+    stems = {n: d / f"{n}.wav" for n in names}
+    if all(p.exists() for p in stems.values()):
+        stage("이전 분리 결과 재사용 (분리 생략)")
+        return stems, None
+    d.mkdir(parents=True, exist_ok=True)
+    stage("오디오 변환")
+    to_wav(audio, d, max_sec).replace(stems["mix"])
+    return stems, d
+
+
+def separate(stems: dict, d: Path, model: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        stage("음원 분리 중 (가장 오래 걸려요)")
+        subprocess.run([sys.executable, "-m", "demucs", "-n", model, "--overlap", "0.1", "-o", tmp,
+                        str(stems["mix"])], check=True)
+        out = Path(tmp) / model / "mix"
+        for n in ("vocals", "bass", "other"):
+            shutil.move(str(out / f"{n}.wav"), str(stems[n]))
+    old = sorted((p for p in CACHE.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime)[:-3]
+    for p in old:                                  # 최근 3곡만 보관
+        shutil.rmtree(p, ignore_errors=True)
 
 
 def transcribe(wav: Path, **kw) -> list:
-    _, midi, _ = predict(str(wav), **kw)
+    global _MODEL
+    if _MODEL is None:
+        from basic_pitch import ICASSP_2022_MODEL_PATH
+        from basic_pitch.inference import Model
+        _MODEL = Model(ICASSP_2022_MODEL_PATH)
+    _, midi, _ = predict(str(wav), _MODEL, **kw)
     return [n for i in midi.instruments for n in i.notes]
 
 
@@ -160,6 +202,18 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
     return round(bpm, 2), beats, k0        # MIDI에 저장되는 값과 동일하게 맞춰 격자 오차 방지
 
 
+def cached_beat_grid(stems, a):
+    if a.bpm:
+        return beat_grid(stems["mix"], a.bpm, a.tracker)
+    f = stems["mix"].with_name(f"beats_{a.tracker}.npz")
+    if f.exists():
+        z = np.load(f)
+        return float(z["bpm"]), z["beats"], int(z["k0"])
+    bpm, beats, k0 = beat_grid(stems["mix"], None, a.tracker)
+    np.savez(f, bpm=bpm, beats=beats, k0=k0)
+    return bpm, beats, k0
+
+
 def snap(notes, bpm, beats, k0=0, div=4, shift=None):
     """실제 시각 -> 박 위치(첫 마디 첫 박 기준) -> 16분음표 칸 정렬 -> 고정 템포 시각."""
     if len(beats) < 4:
@@ -255,27 +309,41 @@ def chord_notes(spans, beats, lo=55, hi=71):
     return out
 
 
-def build(stems, a):
-    bpm, beats, k0 = beat_grid(stems["mix"], a.bpm, a.tracker)
+def build(stems, a, grid):
+    bpm, beats, k0 = grid
     print(f"tempo: {bpm:.1f} BPM, beats: {len(beats)}, 첫 마디 시작 박 #{k0}")
     pm = pretty_midi.PrettyMIDI(initial_tempo=round(bpm, 2))
     piano = pretty_midi.Instrument(0, name="Piano")
-    parts = {
-        "vocals": monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
-                             onset_threshold=0.35, frame_threshold=0.2, melodia_trick=True,
-                             minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len),
-        "bass": monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
-                           onset_threshold=0.4, frame_threshold=0.25, minimum_frequency=35,
-                           maximum_frequency=350), 28, 60), 0.15), 0.1),
-    }
-    if a.accomp == "notes":
-        parts["other"] = limit_poly(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=100,
-                                    onset_threshold=0.45, frame_threshold=0.3), 48, 88), 0.2),
-                                    a.accomp_poly, 0.2, 30)
-    elif a.accomp == "chords":
+
+    def vocals():
+        return monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
+                          onset_threshold=0.35, frame_threshold=0.2, melodia_trick=True,
+                          minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
+
+    def bass():
+        return monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
+                          onset_threshold=0.4, frame_threshold=0.25, minimum_frequency=35,
+                          maximum_frequency=350), 28, 60), 0.15), 0.1)
+
+    def other():
+        return limit_poly(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=100,
+                          onset_threshold=0.45, frame_threshold=0.3), 48, 88), 0.2),
+                          a.accomp_poly, 0.2, 30)
+
+    def chords():
         spans = recognize_chords(stems, beats)
         print("chords:", " ".join(f"{_NAMES[r]}{k}" for _, _, r, k in spans[:16]), "…")
-        parts["chords"] = chord_notes(spans, beats)
+        return chord_notes(spans, beats)
+
+    stage("보컬·베이스·코드 분석 중 (동시에 처리)")
+    tasks = {"vocals": vocals, "bass": bass}
+    if a.accomp == "notes":
+        tasks["other"] = other
+    elif a.accomp == "chords":
+        tasks["chords"] = chords
+    with ThreadPoolExecutor(len(tasks)) as ex:
+        futs = {k: ex.submit(f) for k, f in tasks.items()}
+        parts = {k: f.result() for k, f in futs.items()}
     shift = None
     allraw = [n for ns in parts.values() for n in ns]
     if allraw:
@@ -325,14 +393,22 @@ def main():
                     help="반주 방식: chords=코드 인식(기본, 깔끔), notes=음 전사(복잡), none=멜로디+베이스만")
     ap.add_argument("--no-accompaniment", action="store_true", help="--accomp none 과 동일")
     ap.add_argument("--tracker", choices=["beat_this", "librosa"], default="beat_this", help="박 추적 방식")
+    ap.add_argument("--max-sec", type=float, default=None, help="앞 N초만 변환(빠른 미리보기)")
     ap.add_argument("--bpm", type=float, default=None, help="BPM을 직접 지정(자동 추정이 틀릴 때)")
     a = ap.parse_args()
     if a.no_accompaniment:
         a.accomp = "none"
     a.out.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        stems = separate(a.audio, Path(tmp), a.model)
-        pm = build(stems, a)
+    CACHE.mkdir(exist_ok=True)
+    stems, fresh = prepare(a.audio, a.model, a.max_sec)
+    with ThreadPoolExecutor(1) as ex:
+        stage("박·마디 추적 (음원 분리와 동시에)")
+        beat_future = ex.submit(cached_beat_grid, stems, a)      # 분리와 병렬로 실행
+        if fresh is not None:
+            separate(stems, fresh, a.model)
+        grid = beat_future.result()
+    pm = build(stems, a, grid)
+    stage("MIDI·악보 저장")
     mid = a.out / f"{a.audio.stem}_piano.mid"
     pm.write(str(mid)); print("MIDI:", mid)
     try:
