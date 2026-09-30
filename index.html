@@ -4,8 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Music to Piano</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.4.4/abcjs-basic-min.js"></script>
 <style>
 :root{--bg:#fff;--fg:#1b1b1f;--mut:#6b6b76;--card:#f3f3f7;--acc:#4f46e5}
+#score{overflow-x:auto;background:#fff;border-radius:8px;padding:8px}
+select{font-size:14px;padding:4px}
+@media print{body>main>*:not(#scorecard){display:none}}
 @media(prefers-color-scheme:dark){:root{--bg:#121216;--fg:#ececf1;--mut:#9a9aa6;--card:#1d1d24;--acc:#8b85ff}}
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
 main{max-width:820px;margin:0 auto;padding:24px 16px}
@@ -30,6 +34,7 @@ progress{width:100%}
 <input id="file" type="file" accept="audio/*" hidden></div>
 
 <div class="card">
+<label>모드 <select id="mode"><option value="song">가수곡 (멜로디+베이스)</option><option value="poly">피아노/악기곡 (다성)</option></select></label><br>
 <label>민감도 <input id="sens" type="range" min="1" max="10" value="5"></label>
 <label>최대 동시음 <input id="poly" type="range" min="1" max="8" value="4"></label>
 <label>최소 길이(ms) <input id="minlen" type="range" min="40" max="300" value="90"></label>
@@ -46,6 +51,9 @@ progress{width:100%}
 <button id="dwav" disabled>WAV 저장</button>
 </div>
 </div>
+
+<div class="card" id="scorecard"><div id="score">변환하면 악보가 여기에 표시됩니다.</div>
+<button id="dabc" disabled>악보(ABC) 저장</button><button id="prn" disabled>악보 인쇄 / PDF</button> <span id="bpm" class="s"></span></div>
 
 <p class="s">방식: STFT → 하모닉 합산 음높이 점수 → 배음 제거를 반복하는 다성 추정 → 음 추적 → 피아노 합성. 단일 악기나 피아노곡에 가장 정확하고, 여러 악기가 섞인 곡은 근사치입니다.</p>
 </main>
@@ -104,9 +112,11 @@ async function transcribe(){
     // 스펙트럼 평탄화(배경 제거)
     const W=Float32Array.from(S);
     const chosen=[];let first=0;
-    for(let it=0;it<maxP;it++){
+    const song=$('mode').value==='song',iters=song?2:maxP;
+    for(let it=0;it<iters;it++){
       let best=-1,bs=0;
-      for(let m=LO;m<=HI;m++){
+      const lo=song?(it==0?55:33):LO,hi=song?(it==0?84:52):HI;
+      for(let m=lo;m<=hi;m++){
         let sc=0;const f0=mf(m);
         for(let h=0;h<H.length;h++){
           const k=Math.round(f0*(h+1)/binHz);if(k>=nb-1)break;
@@ -116,7 +126,8 @@ async function transcribe(){
       }
       if(best<0)break;
       if(it==0)first=bs;
-      if(bs<first*(it==0?0:thr+0.25)||bs<1.2)break;
+      if(song){if(bs<1.2+(10-sens)*.12)continue;}
+      else if(bs<first*(it==0?0:thr+0.25)||bs<1.2)break;
       chosen.push(best);
       const f0=mf(best);
       for(let h=0;h<8;h++){const k=Math.round(f0*(h+1)/binHz);for(let d=-2;d<=2;d++)if(k+d>0&&k+d<nb)W[k+d]*=0.15;}
@@ -188,6 +199,60 @@ function midiOf(ns){
   return new Blob([new Uint8Array([...hd,...th,...tr])],{type:'audio/midi'});
 }
 
+// ---------- 악보 (ABC) ----------
+function estBpm(ns){
+  let best=100,bs=-1;
+  for(let b=60;b<=180;b++){const g=60/b/2;let sc=0;
+    for(const n of ns)sc+=Math.cos(2*Math.PI*n.t/g);
+    sc*=1-Math.abs(b-110)/400;if(sc>bs){bs=sc;best=b}}
+  return best;
+}
+const NM=['C','^C','D','^D','E','F','^F','G','^G','A','^A','B'];
+function pitch(m,acc){
+  const pc=m%12,oct=Math.floor(m/12)-1;let n=NM[pc],sh=n[0]==='^',L=sh?n[1]:n[0],key=L+oct,pre='';
+  if(sh){pre='^';acc[key]=1}else if(acc[key]){pre='=';delete acc[key]}
+  let o=oct>=5?L.toLowerCase()+"'".repeat(oct-5):L+','.repeat(Math.max(0,4-oct));
+  return pre+o;
+}
+const DUR=[16,12,8,6,4,3,2,1];
+function abcVoice(list,g,totalUnits){
+  list=list.slice().sort((a,b)=>a.t-b.t);let pos=0,out='',acc={};
+  const emit=(name,len)=>{
+    while(len>0){
+      if(pos%16===0&&pos>0){out+='| ';acc={}}
+      const d=DUR.find(x=>x<=Math.min(len,16-(pos%16)));
+      out+=name+d+' ';pos+=d;len-=d;
+    }
+  };
+  for(const n of list){
+    let s=Math.round(n.t/g),e=Math.max(s+1,Math.round((n.t+n.d)/g));
+    if(s<pos)s=pos;if(e<=s)continue;
+    if(s>pos)emit('z',s-pos);
+    const name=pitch(n.m,acc);
+    let len=e-s,first=true;
+    while(len>0){
+      if(pos%16===0&&pos>0){out+='| ';acc={}}
+      const room=16-(pos%16),d=DUR.find(x=>x<=Math.min(len,room)),lastPart=len-d===0;
+      out+=(first?name:name.replace(/^[\^=]/,''))+d+(lastPart?'':'-')+' ';
+      pos+=d;len-=d;first=false;
+    }
+  }
+  while(pos<totalUnits){const room=16-(pos%16);if(pos%16===0&&pos>0)out+='| ';const d=DUR.find(x=>x<=Math.min(room,totalUnits-pos));out+='z'+d+' ';pos+=d}
+  return out+'|]';
+}
+function makeAbc(ns,bpm){
+  const g=60/bpm/4,total=Math.ceil(dur/g/16)*16;
+  const mel=ns.filter(n=>n.m>=53),bas=ns.filter(n=>n.m<53);
+  return `X:1\nT:Piano Arrangement\nM:4/4\nL:1/16\nQ:1/4=${bpm}\nK:C\n%%score {1 | 2}\nV:1 clef=treble\nV:2 clef=bass\n[V:1] ${abcVoice(mel,g,total)}\n[V:2] ${abcVoice(bas,g,total)}\n`;
+}
+let abcText='';
+function showScore(){
+  const bpm=estBpm(notes);abcText=makeAbc(notes,bpm);$('bpm').textContent=`추정 템포 ♩=${bpm}, 4/4, 16분음표 단위로 정렬됨`;
+  if(window.ABCJS){$('score').innerHTML='';ABCJS.renderAbc('score',abcText,{responsive:'resize',staffwidth:740,wrap:{minSpacing:1.6,maxSpacing:2.6,preferredMeasuresPerLine:4}})}
+  else $('score').textContent='악보 라이브러리를 불러오지 못했어요(인터넷 연결 확인). ABC 저장은 가능합니다.';
+  $('dabc').disabled=$('prn').disabled=false;
+}
+
 // ---------- 피아노롤 ----------
 function draw(ph=-1){
   const c=$('roll'),r=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
@@ -213,7 +278,7 @@ async function pick(f){try{await load(f)}catch(e){$('st').textContent='파일을
 $('go').onclick=async()=>{
   stop();$('go').disabled=true;$('pg').hidden=false;$('st').textContent='음 분석 중…';
   try{
-    notes=await transcribe();draw();
+    notes=await transcribe();draw();showScore();
     $('st').textContent=`${notes.length}개 음 검출 · 피아노 렌더링 중…`;
     const ab=await renderPiano(notes,dur);wavBlob=wavOf(ab);
     const c=ctx=ctx||new (window.AudioContext||webkitAudioContext)();
@@ -233,6 +298,8 @@ $('play').onclick=()=>{
 };
 const dl=(b,n)=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=n;a.click()};
 $('dmid').onclick=()=>dl(midiOf(notes),'piano.mid');
+$('dabc').onclick=()=>dl(new Blob([abcText],{type:'text/plain'}),'piano.abc');
+$('prn').onclick=()=>print();
 $('dwav').onclick=()=>dl(wavBlob,'piano.wav');
 addEventListener('resize',()=>draw());draw();
 </script>
