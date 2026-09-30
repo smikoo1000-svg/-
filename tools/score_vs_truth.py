@@ -23,13 +23,37 @@ def f1(ref, est, shift, tol=0.08, pc=False):
     return P, R, F
 
 
+def warp(ref, est, res=0.01, span=3.0):
+    """est 시간축에 배율 a와 이동 b를 적용해 ref와 시작 시각이 가장 많이 겹치게 만든다(FFT 상관)."""
+    T = int(max(max(n.end for n in ref), max(n.end for n in est)) * 1.05 / res) + int(2 * span / res) + 10
+    def vec(ts):
+        v = np.zeros(T); v[np.clip(((np.array(ts) + span) / res).astype(int), 0, T - 1)] = 1; return v
+    rv = np.fft.rfft(vec([n.start for n in ref]))
+    best = (-1, 1.0, 0.0)
+    for a in np.linspace(0.97, 1.03, 121):
+        ev = np.fft.rfft(vec([n.start * a for n in est]))
+        cc = np.fft.irfft(rv * np.conj(ev), T)
+        lags = np.r_[np.arange(0, T // 2), np.arange(-T // 2, 0)]
+        ok = np.abs(lags * res) <= 4.0                                   # 이동은 ±4초 안에서만 (반복 구조 오인 방지)
+        k = int(np.argmax(np.where(ok, cc, -1)))
+        if cc[k] > best[0]: best = (cc[k], a, lags[k] * res)
+    _, a, b = best
+    print(f"  (시간축 보정: 배율 {a:.4f}, 이동 {b*1000:+.0f}ms)")
+    return [pretty_midi.Note(velocity=n.velocity, pitch=n.pitch, start=n.start * a + b, end=n.end * a + b) for n in est]
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("truth"); ap.add_argument("result")
     ap.add_argument("--from", dest="a", type=float, default=0); ap.add_argument("--to", dest="b", type=float, default=1e9)
+    ap.add_argument("--warp", action="store_true", help="시간축 배율(±3%%)과 이동을 함께 보정(정답이 고정 템포 격자일 때)")
     x = ap.parse_args()
     ref, est = load(x.truth, x.a, x.b), load(x.result, x.a - .5, x.b + .5)
-    F, s = max((f1(ref, est, s)[2], s) for s in np.arange(-0.4, 0.401, 0.01))
+    if x.warp:
+        est = warp(ref, est)
+        F, s = max((f1(ref, est, s)[2], s) for s in np.arange(-0.2, 0.201, 0.01))
+    else:
+        F, s = max((f1(ref, est, s)[2], s) for s in np.arange(-0.4, 0.401, 0.01))
     P, R, F = f1(ref, est, s)
     print(f"정답 {len(ref)}음 / 결과 {len(est)}음 | P {P:.2f}  R {R:.2f}  F1 {F:.3f}  (시간 이동 {s*1000:+.0f}ms)")
     print(f"옥타브 무시 F1 {f1(ref, est, s, pc=True)[2]:.3f}")
