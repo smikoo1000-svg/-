@@ -22,3 +22,10 @@ python pipeline/song2piano.py song.mp3 -o out/
 ```
 
 Demucs로 보컬/베이스/반주 분리 → Basic Pitch로 각 파트 전사 → 피아노 한 대로 합쳐 `*_piano.mid`와 `*_piano.musicxml`(MuseScore 등에서 열기) 출력. 반주를 빼려면 `--no-accompaniment`. GPU가 없으면 곡당 몇 분 걸리며, Colab GPU에서 돌리면 빠릅니다.
+
+### 정확한 버전을 사이트로 실행
+```
+pip install -r pipeline/requirements.txt
+python pipeline/server.py      # http://localhost:8000
+```
+브라우저에서 파일을 올리면 MIDI와 악보(MusicXML)를 내려받을 수 있습니다. 서버가 필요하므로 GitHub Pages에는 올릴 수 없고, 본인 PC나 Colab/클라우드 서버에서 실행하세요.
