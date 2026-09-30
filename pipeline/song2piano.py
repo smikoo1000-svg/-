@@ -395,6 +395,8 @@ def build(stems, a, grid):
     tasks = {"vocals": vocals, "bass": bass}
     if a.accomp == "notes":
         tasks["other"] = other
+    elif a.accomp == "octave":
+        tasks["lead"] = lead
     elif a.accomp in ("chords", "lead"):
         tasks["chords"] = chords
         if a.accomp == "lead":
@@ -406,7 +408,23 @@ def build(stems, a, grid):
         mel = [n.pitch for k in ("vocals", "lead") for n in parts.get(k, [])]
         hi = int(np.clip(np.percentile(mel, 25) - 2, 55, 66)) if mel else 64
         parts["chords"] = chord_notes(parts["chords"], beats, lo=hi - 14, hi=hi)
-    if "lead" in parts:                                   # 보컬과 같은 순간·같은 음이면 중복이라 제거
+    if a.accomp == "octave":
+        # 정답 편곡(사람이 만든 하프 솔로)과 비교해 찾은 스타일: 멜로디를 한 옥타브 위로 겹쳐 치고,
+        # 베이스는 너무 낮지 않게 48~60 음역으로 접고, 지속 코드 층은 넣지 않는다.
+        v = parts["vocals"]
+        lead_ = [n for n in parts["lead"] if n.velocity >= 40 and not any(
+            x.start < n.end and n.start < x.end and x.pitch % 12 == n.pitch % 12 for x in v)]
+        melody = sorted(v + lead_, key=lambda n: n.start)
+        parts["vocals"] = melody
+        parts["lead"] = [pretty_midi.Note(velocity=n.velocity, pitch=min(n.pitch + 12, 100), start=n.start, end=n.end)
+                         for n in melody]
+        def fold(p, lo=48, hi=60):
+            while p < lo: p += 12
+            while p > hi: p -= 12
+            return p
+        parts["bass"] = [pretty_midi.Note(velocity=n.velocity, pitch=fold(n.pitch), start=n.start, end=n.end)
+                         for n in parts["bass"]]
+    if "lead" in parts and a.accomp != "octave":          # 보컬과 같은 순간·같은 음이면 중복이라 제거
         v = parts["vocals"]
         parts["lead"] = [n for n in parts["lead"] if n.velocity >= 40 and not any(
             x.start < n.end and n.start < x.end and x.pitch % 12 == n.pitch % 12 for x in v)]
@@ -470,8 +488,8 @@ def main():
     ap.add_argument("--model", default="htdemucs")
     ap.add_argument("--min-len", type=float, default=0.06, help="보컬 최소 음 길이(초)")
     ap.add_argument("--accomp-poly", type=int, default=2, help="반주 최대 동시음")
-    ap.add_argument("--accomp", choices=["lead", "chords", "notes", "none"], default="lead",
-                    help="반주 방식: lead=코드+리드 선율(기본), chords=코드만, notes=음 전사(복잡), none=멜로디+베이스만")
+    ap.add_argument("--accomp", choices=["octave", "lead", "chords", "notes", "none"], default="octave",
+                    help="반주 방식: octave=멜로디 옥타브 겹침(기본), lead=코드+리드 선율, chords=코드만, notes=음 전사(복잡), none=멜로디+베이스만")
     ap.add_argument("--no-accompaniment", action="store_true", help="--accomp none 과 동일")
     ap.add_argument("--tracker", choices=["beat_this", "librosa"], default="beat_this", help="박 추적 방식")
     ap.add_argument("--max-sec", type=float, default=None, help="앞 N초만 변환(빠른 미리보기)")

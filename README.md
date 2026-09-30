@@ -33,3 +33,6 @@ python pipeline/server.py      # http://localhost:8000
 ### 파이프라인 구조 (Sheet Sage 방식 참고)
 분리(Demucs) → **박/마디 추적(Beat This!)** → 보컬 멜로디·베이스 전사(Basic Pitch) → **코드 인식(크로마+Viterbi)** → 피아노 반주로 합성 → 16분음표 정렬 후 MIDI/MusicXML.
 `--accomp chords|notes|none`(반주 방식), `--bpm 120`(템포 직접 지정).
+
+### 정답과 비교해 점수 내기
+`python tools/score_vs_truth.py 정답.mid 결과.mid` (P/R/F1). 반주 방식 `--accomp octave`(기본)는 정답 편곡과 비교해 점수가 가장 높았던 방식(멜로디를 한 옥타브 위로 겹침 + 베이스 접기).
