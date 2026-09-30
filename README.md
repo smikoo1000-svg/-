@@ -29,3 +29,7 @@ pip install -r pipeline/requirements.txt
 python pipeline/server.py      # http://localhost:8000
 ```
 브라우저에서 파일을 올리면 MIDI와 악보(MusicXML)를 내려받을 수 있습니다. 서버가 필요하므로 GitHub Pages에는 올릴 수 없고, 본인 PC나 Colab/클라우드 서버에서 실행하세요.
+
+### 파이프라인 구조 (Sheet Sage 방식 참고)
+분리(Demucs) → **박/마디 추적(Beat This!)** → 보컬 멜로디·베이스 전사(Basic Pitch) → **코드 인식(크로마+Viterbi)** → 피아노 반주로 합성 → 16분음표 정렬 후 MIDI/MusicXML.
+`--accomp chords|notes|none`(반주 방식), `--bpm 120`(템포 직접 지정).

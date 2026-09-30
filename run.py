@@ -35,5 +35,10 @@ if not ok():
         "--index-url", "https://download.pytorch.org/whl/cpu")
     run(uv, "pip", "install", "--python", py, "-r", "pipeline/requirements.txt")
 
+# 이미 설치된 환경에는 Beat This!(박/마디 추적)만 추가
+if subprocess.run([str(py), "-c", "import beat_this"], cwd=root, capture_output=True).returncode != 0:
+    print("박자 추적 모델(Beat This!) 설치 중…")
+    subprocess.run([str(uv), "pip", "install", "--python", str(py), "beat_this"], cwd=root)
+
 print("서버 시작: 하단 '포트' 탭의 8000번을 브라우저로 여세요")
 os.execv(str(py), [str(py), str(root / "pipeline" / "server.py")])

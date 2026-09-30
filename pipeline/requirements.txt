@@ -5,3 +5,4 @@ music21
 soundfile
 flask
 setuptools<81
+beat_this
