@@ -149,6 +149,29 @@ def refine_onsets(notes, wav: Path, win=0.07):
     return sorted(out, key=lambda n: n.start)
 
 
+def chroma_correct(notes, wav: Path, margin=1.5):
+    """Basic Pitch 음의 음이름이 보컬 스템 크로마와 크게 어긋나면(크로마 최대 음이름의 세기가
+    현재 음이름의 margin배 이상) 가장 가까운 옥타브의 크로마 최대 음이름으로 바꾼다."""
+    import librosa
+    sr, hop = 22050, 512
+    y = librosa.load(str(wav), sr=sr, mono=True)[0]
+    ch = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop)
+    out, changed = [], 0
+    for n in notes:
+        a = int(n.start * sr / hop)
+        b = max(a + 2, int(n.end * sr / hop))
+        if b >= ch.shape[1]:
+            out.append(n); continue
+        c = ch[:, a:b].mean(axis=1)
+        best = int(np.argmax(c)); cur = n.pitch % 12
+        if best != cur and c[best] >= margin * max(c[cur], 1e-6):
+            p = n.pitch + ((best - cur + 6) % 12 - 6)          # 가장 가까운 음으로
+            out.append(pretty_midi.Note(velocity=n.velocity, pitch=int(p), start=n.start, end=n.end)); changed += 1
+        else:
+            out.append(n)
+    return out
+
+
 def fix_octave_outliers(notes):
     """단선율에서 앞뒤 음과 8반음 이상 떨어진 채 혼자 튀는 음은 옥타브 오인식일 가능성이 크다.
     앞뒤가 가까운데(5반음 이내) 가운데만 튀면 옥타브를 옮겨 가장 가까운 곳으로 되돌린다."""
@@ -164,11 +187,12 @@ def fix_octave_outliers(notes):
     return ns
 
 
-def lowline(stems, lo=48, hi=59, maxdur=0.46):
+def lowline(stems, lo=None, hi=None, maxdur=0.46):
     """낮은 음 파트(리듬 위주의 저음 라인). 소리가 시작하는 지점은 반주 스템에서, 음이름은 베이스 스템의
     크로마(가장 센 음이름)에서 잡아 lo~hi 음역에 놓는다. Basic Pitch로 베이스를 전사하는 것보다
     정답 편곡과의 일치도가 훨씬 높았다."""
     import librosa
+    lo = int(os.environ.get("LOW_LO", 48)) if lo is None else lo
     sr, hop = 22050, 512
     yb = librosa.load(str(stems["bass"]), sr=sr, mono=True)[0]
     yo = librosa.load(str(stems["other"]), sr=sr, mono=True)[0]
@@ -398,7 +422,10 @@ def build(stems, a, grid):
                           onset_threshold=float(os.environ.get("BP_ONSET", 0.35)),
                           frame_threshold=float(os.environ.get("BP_FRAME", 0.2)), melodia_trick=True,
                           minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
-        return refine_onsets(fix_octave_outliers(v), stems["vocals"])
+        v = fix_octave_outliers(v)
+        if os.environ.get("CHROMA_FIX"):
+            v = chroma_correct(v, stems["vocals"], float(os.environ["CHROMA_FIX"]))
+        return refine_onsets(v, stems["vocals"])
 
     def bass():
         b = monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
@@ -426,6 +453,8 @@ def build(stems, a, grid):
     tasks = {"vocals": vocals, "bass": bass}
     if a.accomp == "octave":
         tasks = {"vocals": vocals, "lead": lead, "bass": lambda: lowline(stems)}   # 베이스 파트 = 저음 리듬 라인
+        if os.environ.get("OCT_CHORDS"):
+            tasks["chords"] = chords
     elif a.accomp == "notes":
         tasks["other"] = other
     elif a.accomp in ("chords", "lead"):
@@ -446,6 +475,10 @@ def build(stems, a, grid):
         lead_ = [n for n in parts["lead"] if n.velocity >= 40 and not any(
             x.start < n.end and n.start < x.end and x.pitch % 12 == n.pitch % 12 for x in v)]
         melody = sorted(v + lead_, key=lambda n: n.start)
+        _ms = int(os.environ.get("MEL_SHIFT", 0))
+        if _ms:
+            melody = [pretty_midi.Note(velocity=n.velocity, pitch=int(min(max(n.pitch + _ms, 28), 100)),
+                                       start=n.start, end=n.end) for n in melody]
         parts["vocals"] = melody
         parts["lead"] = [pretty_midi.Note(velocity=n.velocity, pitch=min(n.pitch + 12, 100), start=n.start, end=n.end)
                          for n in melody]
