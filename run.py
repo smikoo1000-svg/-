@@ -24,7 +24,7 @@ uv = find_uv()
 if not py.exists():
     run(uv, "venv", "--python", "3.11", venv)
 
-check = "import pretty_midi, demucs, basic_pitch, music21, flask"
+check = "import pkg_resources, pretty_midi, demucs, basic_pitch, music21, flask"
 if subprocess.run([str(py), "-c", check], cwd=root, capture_output=True).returncode != 0:
     print("패키지 설치 중… (처음엔 몇 분 걸려요, Ctrl+C 누르지 마세요)")
     # GPU(CUDA)용 대용량 torch 대신 CPU용을 먼저 설치
