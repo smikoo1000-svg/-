@@ -15,6 +15,9 @@ if not py.exists():
 check = "import pretty_midi, demucs, basic_pitch, music21, flask"
 if subprocess.run([str(py), "-c", check], cwd=root, capture_output=True).returncode != 0:
     print("패키지 설치 중… (처음엔 몇 분 걸려요)")
+    # GPU(CUDA)용 대용량 torch 대신 CPU용을 먼저 설치
+    run(sys.executable, "-m", "uv", "pip", "install", "--python", py, "torch", "torchaudio",
+        "--index-url", "https://download.pytorch.org/whl/cpu")
     run(sys.executable, "-m", "uv", "pip", "install", "--python", py, "-r", "pipeline/requirements.txt")
 
 print("서버 시작: 하단 '포트' 탭의 8000번을 브라우저로 여세요")
