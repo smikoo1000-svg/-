@@ -149,6 +149,21 @@ def refine_onsets(notes, wav: Path, win=0.07):
     return sorted(out, key=lambda n: n.start)
 
 
+def fix_octave_outliers(notes):
+    """단선율에서 앞뒤 음과 8반음 이상 떨어진 채 혼자 튀는 음은 옥타브 오인식일 가능성이 크다.
+    앞뒤가 가까운데(5반음 이내) 가운데만 튀면 옥타브를 옮겨 가장 가까운 곳으로 되돌린다."""
+    ns = sorted(notes, key=lambda n: n.start)
+    fixed = 0
+    for i in range(1, len(ns) - 1):
+        p, c, n = ns[i - 1].pitch, ns[i].pitch, ns[i + 1].pitch
+        if abs(c - p) >= 8 and abs(c - n) >= 8 and abs(p - n) <= 5:
+            target = (p + n) / 2
+            cand = min((c - 12, c + 12), key=lambda x: abs(x - target))
+            if abs(cand - target) <= 6:
+                ns[i].pitch, fixed = cand, fixed + 1
+    return ns
+
+
 def limit_poly(notes, max_poly, min_len, min_vel):
     """반주: 짧은/약한 음 제거, 동시음 max_poly개로 제한."""
     notes = sorted((n for n in notes if n.end - n.start >= min_len and n.velocity >= min_vel), key=lambda n: n.start)
@@ -301,7 +316,7 @@ def recognize_chords(stems, beats):
     return spans
 
 
-def chord_notes(spans, beats, lo=55, hi=71):
+def chord_notes(spans, beats, lo=48, hi=64):
     """코드 -> 오른손 화음(가까운 전위로 부드럽게 연결). 왼손 베이스는 별도 전사를 쓴다."""
     out, prev = [], None
     for s, e, root, kind in spans:
@@ -335,7 +350,7 @@ def build(stems, a, grid):
         v = monophonic(merge_same_pitch(in_range(transcribe(stems["vocals"], minimum_note_length=80,
                           onset_threshold=0.35, frame_threshold=0.2, melodia_trick=True,
                           minimum_frequency=100, maximum_frequency=1200), 48, 84), 0.12), a.min_len)
-        return refine_onsets(v, stems["vocals"])
+        return refine_onsets(fix_octave_outliers(v), stems["vocals"])
 
     def bass():
         b = monophonic(merge_same_pitch(in_range(transcribe(stems["bass"], minimum_note_length=90,
@@ -352,12 +367,12 @@ def build(stems, a, grid):
         """반주 스템의 눈에 띄는 리드 선율(신스/기타/카우벨 등). 보컬과 겹치는 음은 뺀다."""
         l = monophonic(merge_same_pitch(in_range(transcribe(stems["other"], minimum_note_length=80,
                           onset_threshold=0.4, frame_threshold=0.25), 60, 96), 0.1), 0.08)
-        return refine_onsets(l, stems["other"])
+        return refine_onsets(fix_octave_outliers(l), stems["other"])
 
     def chords():
         spans = recognize_chords(stems, beats)
         print("chords:", " ".join(f"{_NAMES[r]}{k}" for _, _, r, k in spans[:16]), "…")
-        return chord_notes(spans, beats)
+        return spans
 
     stage("보컬·베이스·코드 분석 중 (동시에 처리)")
     tasks = {"vocals": vocals, "bass": bass}
@@ -370,10 +385,18 @@ def build(stems, a, grid):
     with ThreadPoolExecutor(len(tasks)) as ex:
         futs = {k: ex.submit(f) for k, f in tasks.items()}
         parts = {k: f.result() for k, f in futs.items()}
+    if "chords" in parts:                                 # 코드 음역을 멜로디 바로 아래로 (뭉개짐 방지)
+        mel = [n.pitch for k in ("vocals", "lead") for n in parts.get(k, [])]
+        hi = int(np.clip(np.percentile(mel, 25) - 2, 55, 66)) if mel else 64
+        parts["chords"] = chord_notes(parts["chords"], beats, lo=hi - 14, hi=hi)
     if "lead" in parts:                                   # 보컬과 같은 순간·같은 음이면 중복이라 제거
         v = parts["vocals"]
         parts["lead"] = [n for n in parts["lead"] if n.velocity >= 40 and not any(
             x.start < n.end and n.start < x.end and x.pitch % 12 == n.pitch % 12 for x in v)]
+    if "chords" in parts:                                 # 멜로디/베이스와 같은 높이를 동시에 치는 코드 음은 뺀다
+        others = [n for k, ns_ in parts.items() if k != "chords" for n in ns_]
+        parts["chords"] = [c for c in parts["chords"] if not any(
+            o.pitch == c.pitch and o.start < c.end and c.start < o.end for o in others)]
     shift = None
     allraw = [n for ns in parts.values() for n in ns]
     if allraw:
