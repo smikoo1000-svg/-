@@ -91,6 +91,29 @@ def limit_poly(notes, max_poly, min_len, min_vel):
     return keep
 
 
+def unify_beat_level(beats):
+    """박 추적기가 구간마다 4분음표/8분음표 단위를 오락가락하면(예: 97↔200 BPM)
+    시간 축이 뒤틀린다. 기준 간격(80~160 BPM 범위로 접은 중앙값)에 맞춰 촘촘한 구간의 박을 솎아 낸다."""
+    beats = np.asarray(beats, float)
+    if len(beats) < 8:
+        return beats
+    ref = float(np.median(np.diff(beats)))
+    while 60 / ref > 160:
+        ref *= 2
+    while 60 / ref < 80:
+        ref /= 2
+    # 큰 간격(느린 단위)이 실제로 더 흔하면 그쪽을 기준으로 삼는다
+    iv = np.diff(beats)
+    big = iv[(iv > 0.75 * ref * 1.5 * 0.66) & (iv < ref * 1.4)]
+    if len(big) > 0.25 * len(iv):
+        ref = float(np.median(big))
+    kept = [beats[0]]
+    for b in beats[1:]:
+        if b - kept[-1] >= 0.75 * ref:
+            kept.append(b)
+    return np.asarray(kept)
+
+
 def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
     """박/첫박(다운비트) 추적. 1순위 Beat This!, 실패하면 librosa. -> (bpm, beats, k0)
     k0 = 첫 마디의 첫 박이 beats 배열의 몇 번째인지."""
@@ -109,6 +132,7 @@ def beat_grid(mix: Path, bpm_override=None, tracker="beat_this"):
         y, sr = librosa.load(str(mix), sr=22050, mono=True)
         _, beats = librosa.beat.beat_track(y=y, sr=sr, units="time", tightness=100)
         beats, downs = np.asarray(beats, float), np.asarray([], float)
+    beats = unify_beat_level(beats)
     bpm = 60 / float(np.median(np.diff(beats)))
     while bpm < 80 and len(beats) > 1:               # 너무 느리면 박을 반으로 쪼갬
         beats = np.sort(np.concatenate([beats, (beats[:-1] + beats[1:]) / 2])); bpm *= 2
