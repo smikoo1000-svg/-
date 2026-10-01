@@ -34,7 +34,7 @@ def work(jid, cmd, d):
         if line.startswith("STAGE:"):
             STATE[jid] = dict(status="running", stage=line[6:].strip())
     p.wait()
-    files = sorted(x.name for x in d.glob("*_piano*.*"))
+    files = sorted({x.name for pat in ("*_piano*.*", "*_score.*") for x in d.glob(pat)})
     if files:
         STATE[jid] = dict(status="done", files=files)
     else:
@@ -75,6 +75,27 @@ def convert():
     threading.Thread(target=work, args=(jid, cmd, d), daemon=True).start()
     return jsonify(id=jid)
 
+@app.post("/score")
+def score():
+    """MIDI 파일만 올리면 PDF 악보(+MusicXML)를 만든다 (음원 변환 없이 몇 초)."""
+    up = request.files.get("file")
+    if not up or Path(up.filename or "").suffix.lower() not in (".mid", ".midi"):
+        return jsonify(error="MIDI 파일(.mid)을 올려주세요"), 400
+    jid = uuid.uuid4().hex[:10]
+    d = JOBS / jid; d.mkdir()
+    src = d / "input.mid"
+    up.save(src)
+    (d / "meta.json").write_text(json.dumps(dict(name=up.filename, ts=int(time.time()), kind="score"), ensure_ascii=False), encoding="utf-8")
+    cmd = [sys.executable, str(HERE / "midi2score.py"), str(src), "-o", str(d), "--title", Path(up.filename).stem[:60]]
+    grid = request.form.get("grid", "auto")
+    cmd += ["--grid", grid if grid in ("auto", "8", "16", "3", "mixed", "32") else "auto"]
+    if request.form.get("playable") == "0":
+        cmd.append("--no-playable")
+    STATE[jid] = dict(status="running")
+    threading.Thread(target=work, args=(jid, cmd, d), daemon=True).start()
+    return jsonify(id=jid)
+
+
 JID = re.compile(r"^[0-9a-f]{10}$")
 
 
@@ -88,7 +109,7 @@ def job_info(jid):
     except Exception:
         pass
     st = STATE.get(jid)
-    files = sorted(x.name for x in d.glob("*_piano*.*"))
+    files = sorted({x.name for pat in ("*_piano*.*", "*_score.*") for x in d.glob(pat)})
     if st is None:
         st = dict(status="done", files=files) if files else dict(status="error", error="작업을 찾을 수 없어요(서버가 재시작됐을 수 있어요)")
     return dict(id=jid, meta=meta, **st)

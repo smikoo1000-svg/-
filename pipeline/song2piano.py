@@ -735,6 +735,16 @@ def write_timed_midi(notes, beats, path, tpb=480, pedal=None):
     mid.save(str(path))
 
 
+from fractions import Fraction
+_QL = [Fraction(1, 6), Fraction(1, 3), Fraction(1, 4), Fraction(1, 2), Fraction(2, 3), Fraction(3, 4), Fraction(1), Fraction(4, 3),
+       Fraction(3, 2), Fraction(2), Fraction(3), Fraction(4), Fraction(6), Fraction(8)]
+
+
+def _expressible(ql):
+    """악보에 적을 수 있는 음 길이(점음표·3연음 포함)로 맞춘다. 임의 길이는 MusicXML로 못 내보낸다."""
+    return min(_QL, key=lambda q: abs(float(q) - ql))
+
+
 def reduce_hand(pitches, hand, max_notes=4, max_span=12):
     """한 손이 한 번에 칠 수 있는 음 조합으로 줄인다. 오른손은 맨 위 음(멜로디), 왼손은 맨 아래 음(베이스)을 반드시 남기고,
     나머지는 그 음에 가까운 것부터 스팬(최고-최저)이 max_span 이내이고 max_notes개 이하일 때까지만 추가한다."""
@@ -751,7 +761,7 @@ def reduce_hand(pitches, hand, max_notes=4, max_span=12):
     return sorted(keep)
 
 
-def to_score(midi_path: Path, xml_path: Path, bpm: float = 100, playable: bool = True):
+def to_score(midi_path: Path, xml_path: Path, bpm: float = 100, playable: bool = True, title: str = None):
     from music21 import converter, stream, clef, meter, tempo
     s = converter.parse(str(midi_path), quantizePost=True, quarterLengthDivisors=(4, 3))
     flat = s.flatten()
@@ -762,7 +772,7 @@ def to_score(midi_path: Path, xml_path: Path, bpm: float = 100, playable: bool =
     items = []
     for el in flat.notes:
         for pp in (list(el.pitches) if el.isChord else [el.pitch]):
-            items.append((float(el.offset), pp.midi, max(0.25, float(el.quarterLength))))
+            items.append((Fraction(int(round(float(el.offset) * 12)), 12), pp.midi, _expressible(max(0.25, float(el.quarterLength)))))
     split, prev = {}, 60.0
     for m in range(int(max((o for o, _, _ in items), default=0) // 4) + 1):
         ps = [pm_ for o, pm_, _ in items if int(o // 4) == m]
@@ -774,30 +784,57 @@ def to_score(midi_path: Path, xml_path: Path, bpm: float = 100, playable: bool =
                 c = [float(np.mean(lo_)), float(np.mean(hi_))]
             prev = 0.5 * prev + 0.5 * float(np.clip((c[0] + c[1]) / 2, 54, 66))
         split[m] = prev
-    from music21 import note, chord
+    from music21 import note, chord, key as m21key, pitch as m21pitch
+    try:
+        sharps = int(flat.analyze("key").sharps)               # 곡의 조성을 추정해 조표를 단다(임시표가 줄어든다)
+    except Exception:
+        sharps = 0
+
+    def mk(ps, ql):
+        pitches = []
+        for x in ps:
+            pp = m21pitch.Pitch(x)
+            if sharps < 0 and pp.accidental is not None and pp.accidental.alter == 1:   # 플랫 조성이면 #을 b로
+                pp = pp.getEnharmonic()
+            pitches.append(pp)
+        n = chord.Chord(pitches) if len(pitches) > 1 else note.Note(pitches[0])
+        n.quarterLength = ql
+        return n
+
     groups = {}
     for o, pm_, ql in items:
         side = "r" if pm_ >= split[int(o // 4)] else "l"
-        groups.setdefault((side, round(o, 4), round(ql, 4)), []).append(pm_)
-    if playable:                                         # 한 손이 칠 수 있는 음 조합으로 줄이기 (손 크기·손가락 수 제한)
+        groups.setdefault((side, o, ql), []).append(pm_)
+    if playable:
+        # 한 손이 칠 수 있는 음 조합으로 줄이고(손 크기·손가락 수), 한 손을 한 성부로 만든다:
+        # 음 길이를 다음 음 시작 전까지로 잘라 겹침(여러 성부·어지러운 쉼표)을 없앤다. 지속은 페달이 맡는다.
         byhand = {}
         for (side, o, ql), ps in groups.items():
-            byhand.setdefault((side, o), []).extend((x, ql) for x in ps)
-        groups = {}
-        for (side, o), lst in byhand.items():
-            keep = set(reduce_hand([x for x, _ in lst], side))
-            for x, ql in lst:
-                if x in keep:
-                    groups.setdefault((side, o, ql), []).append(x)
-    for (side, o, ql), ps in groups.items():
-        n = chord.Chord(ps) if len(ps) > 1 else note.Note(ps[0])
-        n.quarterLength = ql
-        (right if side == "r" else left).insert(o, n)
-    right.insert(0, tempo.MetronomeMark(number=round(bpm)))
+            for x in ps:
+                byhand.setdefault((side, o), []).append((x, ql))
+        for side, part in (("r", right), ("l", left)):
+            onsets = sorted(o for (sd, o) in byhand if sd == side)
+            for i, o in enumerate(onsets):
+                lst = byhand[(side, o)]
+                keep = reduce_hand([x for x, _ in lst], side)
+                ql = max(q for _, q in lst)
+                if i + 1 < len(onsets):
+                    ql = min(ql, onsets[i + 1] - o)
+                ql = max((q for q in _QL if q <= ql), default=_QL[0])
+                part.insert(o, mk(keep, ql))
+    else:
+        for (side, o, ql), ps in groups.items():
+            (right if side == "r" else left).insert(o, mk(ps, ql))
+    from music21 import expressions
+    right.insert(0, expressions.TextExpression(f"BPM {round(bpm)}"))
     score = stream.Score([right, left])
+    if title:
+        from music21 import metadata
+        score.insert(0, metadata.Metadata(title=title, composer="Music to Piano"))
     for p in score.parts:
+        p.insert(0, m21key.KeySignature(sharps))
         p.insert(0, meter.TimeSignature("4/4"))
-        p.makeMeasures(inPlace=True)
+        p.makeNotation(inPlace=True)
     score.write("musicxml", fp=str(xml_path))
 
 
@@ -846,12 +883,11 @@ def main():
     if pedal:                                                                                      # 페달만 따로 (컨트롤러 데이터)
         write_timed_midi([], beats_, a.out / f"{stem_name}_piano_pedal.mid", pedal=pedal)
     (a.out / f"{stem_name}_piano_analysis.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
-    try:
-        bars = a.out / f".{a.audio.stem}_bars.mid"                    # 악보용: 마디가 정확히 맞는 버전
-        pm.write(str(bars))
-        xml = a.out / f"{a.audio.stem}_piano.musicxml"
-        to_score(bars, xml, pm.get_tempo_changes()[1][0], playable=a.playable); print("악보:", xml)
-        bars.unlink(missing_ok=True)
+    try:                                                              # 만들어진 MIDI(_piano.mid)로 악보(PDF+MusicXML)를 만든다
+        import midi2score
+        pdf, xml, pages, _, _ = midi2score.midi_to_score(mid, a.out, title=a.audio.stem, grid=a.grid if a.grid != "off" else "auto",
+                                                         playable=a.playable)
+        print(f"악보: {pdf} ({pages}쪽)")
     except Exception as e:
         print("악보 변환 실패(MIDI는 저장됨):", e)
 

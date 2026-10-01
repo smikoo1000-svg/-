@@ -40,5 +40,10 @@ if subprocess.run([str(py), "-c", "import beat_this"], cwd=root, capture_output=
     print("박자 추적 모델(Beat This!) 설치 중…")
     subprocess.run([str(uv), "pip", "install", "--python", str(py), "beat_this"], cwd=root)
 
+# PDF 악보(Verovio + cairosvg + pypdf)도 없으면 추가 설치
+if subprocess.run([str(py), "-c", "import verovio, cairosvg, pypdf"], cwd=root, capture_output=True).returncode != 0:
+    print("PDF 악보 도구(Verovio) 설치 중…")
+    subprocess.run([str(uv), "pip", "install", "--python", str(py), "verovio", "cairosvg", "pypdf"], cwd=root)
+
 print("서버 시작: 하단 '포트' 탭의 8000번을 브라우저로 여세요")
 os.execv(str(py), [str(py), str(root / "pipeline" / "server.py")])

@@ -234,6 +234,14 @@ footer a{color:var(--mut);display:block;padding:2px 0}
       </div>
     </div>
 
+    <div class="card" style="margin-top:16px;padding:22px">
+      <h3 style="margin:0 0 6px">📄 MIDI → PDF 악보</h3>
+      <div class="mut" style="font-size:14px;margin-bottom:12px">이미 가진 MIDI 파일만 올리면 몇 초 만에 PDF 악보로 만들어요. (음원 분석 없이 MIDI 그대로 악보로 변환, 한 손으로 칠 수 있게 정리)</div>
+      <input type="file" id="midiFile" accept=".mid,.midi,audio/midi" style="max-width:100%">
+      <button class="btn sm" id="midiGo" style="margin-top:12px" disabled>PDF 악보 만들기</button>
+      <div id="midiOut" class="mut" style="margin-top:12px"></div>
+    </div>
+
     <div class="result" id="result">
       <div class="res-h"><h2 style="font-size:26px">✅ 변환 완료</h2><span class="mut" id="resName"></span></div>
       <div class="card player">
@@ -388,10 +396,11 @@ function loadScript(src){return loaded[src]??(loaded[src]=new Promise((res,rej)=
 let osmd=null,scoreUrl='';
 async function showResult(id,name,files){
   const base='/jobs/'+id+'/';
-  const mid=files.find(f=>/_piano\.mid$/.test(f)),grid=files.find(f=>/_piano_quantized\.mid$/.test(f)),xml=files.find(f=>/\.musicxml$/.test(f)),
+  const mid=files.find(f=>/_piano\.mid$/.test(f)),grid=files.find(f=>/_piano_quantized\.mid$/.test(f)),xml=files.find(f=>/\.musicxml$/.test(f)),pdf=files.find(f=>/\.pdf$/.test(f)),
         ped=files.find(f=>/_piano_pedal\.mid$/.test(f)),ana=files.find(f=>/_piano_analysis\.json$/.test(f));
   $('#resName').textContent=name;$('#result').classList.add('show');
   $('#dl').innerHTML=[
+    pdf&&`<a href="${base+pdf}" target="_blank" rel="noopener"><span>📄</span><span>PDF 악보<small>인쇄·공유용</small></span></a>`,
     mid&&`<a href="${base+mid}" download><span>🎹</span><span>MIDI (재생용)<small>원곡 리듬 그대로</small></span></a>`,
     grid&&`<a href="${base+grid}" download><span>📐</span><span>MIDI (격자판)<small>16분음표 정렬</small></span></a>`,
     xml&&`<a href="${base+xml}" download><span>🎼</span><span>악보 (MusicXML)<small>MuseScore에서 열기</small></span></a>`,
@@ -435,6 +444,26 @@ document.addEventListener('click',async e=>{
     showResult(j.id,(j.meta&&j.meta.name)||'이전 변환',j.files)}catch(err){toast(err.message)}}
 });
 renderHistory();
+/* MIDI -> PDF 악보 */
+$('#midiFile').onchange=()=>{$('#midiGo').disabled=!$('#midiFile').files[0]};
+$('#midiGo').onclick=async()=>{
+  const f=$('#midiFile').files[0],out=$('#midiOut');if(!f)return;
+  $('#midiGo').disabled=true;out.textContent='악보를 만드는 중… (보통 10~60초)';
+  try{
+    const d=new FormData();d.append('file',f);
+    const x=await fetch('/score',{method:'POST',body:d}),t=await x.text();let j;
+    try{j=JSON.parse(t)}catch(e){throw Error('서버 응답 오류: '+t.slice(0,150))}
+    if(!x.ok)throw Error(j.error||'요청 실패');
+    for(;;){
+      await new Promise(r=>setTimeout(r,2000));
+      const k=JSON.parse(await (await fetch('/status/'+j.id)).text());
+      if(k.status==='done'){const pdf=k.files.find(n=>/\.pdf$/.test(n)),xml=k.files.find(n=>/\.musicxml$/.test(n)),b='/jobs/'+j.id+'/';
+        out.innerHTML='✅ 완료! '+(pdf?`<a href="${b+pdf}" target="_blank" rel="noopener"><b>PDF 악보 열기</b></a>`:'')+(xml?` · <a href="${b+xml}" download>MusicXML</a>`:'');break}
+      if(k.status==='error')throw Error(k.error);
+    }
+  }catch(e){out.textContent='오류: '+e.message}
+  $('#midiGo').disabled=!$('#midiFile').files[0];
+};
 </script>
 </body>
 </html>
