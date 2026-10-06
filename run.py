@@ -45,5 +45,5 @@ if subprocess.run([str(py), "-c", "import verovio, cairosvg, pypdf"], cwd=root, 
     print("PDF 악보 도구(Verovio) 설치 중…")
     subprocess.run([str(uv), "pip", "install", "--python", str(py), "verovio", "cairosvg", "pypdf"], cwd=root)
 
-print("서버 시작: 하단 '포트' 탭의 8000번을 브라우저로 여세요")
+print("서버 시작: 하단 '포트' 탭의 3000번을 브라우저로 여세요")
 os.execv(str(py), [str(py), str(root / "pipeline" / "server.py")])
