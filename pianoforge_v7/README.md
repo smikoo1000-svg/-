@@ -11,3 +11,8 @@ V6 대비 변경점 (프로필 데이터/전사 엔진은 바이트 단위로 �
 
 합치기: cat PianoForge_V7_part1of4.py.part PianoForge_V7_part2of4.py.part PianoForge_V7_part3of4.py.part PianoForge_V7_part4of4.py.part > PianoForge_V7.py
 sha256(PianoForge_V7.py) = 01c9d8a1e971aef2023f6b55c52283c822e6035dc68265c87df510f612e249c1
+
+## 샘플 피아노 (v7 추가)
+FluidSynth + SoundFont가 있으면 실제 샘플 그랜드피아노(FluidR3_GM)로 렌더링하고, 없으면 내장 합성기로 대체합니다.
+설치: `apt-get install -y fluidsynth fluid-soundfont-gm` (다른 SF2는 환경변수 PIANOFORGE_SF2로 지정, PIANOFORGE_SYNTH=builtin 이면 내장 합성기 강제)
+최신 sha256(PianoForge_V7.py) = 7024cfbf51f6fc93d0c7adaa7ccbd0c05cc704f4cd7a13781288b505db7c52ec
